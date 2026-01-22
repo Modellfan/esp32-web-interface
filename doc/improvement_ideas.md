@@ -6,10 +6,10 @@ This document captures proposed improvements for the ESP32 web interface firmwar
 ## 1) Architecture & Structure
 
 ### 1.1 Interchangeable CAN/UART Interface Abstraction
-**Idea:** Create a clear, interchangeable interface for CAN bus communication so that CAN, K-line, UART, or other transports can be swapped without changing business logic.
+**Idea:** Create a clear, interchangeable interface for CAN bus communication so that CAN, UART, or other transports can be swapped without changing business logic.
 
 **Proposal:**
-- Define a `TransportInterface` (or similar) with a small, stable API for `send`, `receive`, `subscribe`, and `health`.
+- Define a `TransportInterface` (or similar) with a small, stable API for `send`, `receive`, `subscribe`.
 - Implement `CanTransport` and `UartTransport` classes that conform to this interface.
 - Ensure higher-level modules (e.g., SDO/parameter logic) depend only on the interface, not the concrete transport.
 
@@ -47,7 +47,6 @@ This document captures proposed improvements for the ESP32 web interface firmwar
 **Idea:** Don’t poll values that are already mapped to CAN and can be read directly from the bus.
 
 **Proposal:**
-- Add metadata to parameters indicating if they are “CAN-mapped.”
 - If mapped, rely on bus updates instead of polling.
 
 **Benefits:**
@@ -58,7 +57,6 @@ This document captures proposed improvements for the ESP32 web interface firmwar
 **Idea:** Some parameters only need to be read once (static metadata). Poll them only at startup.
 
 **Proposal:**
-- Introduce a `read_once` flag or “static” class of parameters.
 - Fetch these on boot and cache them.
 
 **Benefits:**
@@ -76,7 +74,7 @@ This document captures proposed improvements for the ESP32 web interface firmwar
 
 **Benefits:**
 - Unified display for internal and external values.
-- Easy expansion for GPS or NTP time.
+- Easy expansion for GPS or NTP time later.
 
 ### 3.2 Dynamic Values with User-Defined CAN Mappings
 **Idea:** Provide dynamic slots for values where users define RX CAN mapping *and* display name. This enables visualization of OEM messages not implemented in firmware.
@@ -91,7 +89,7 @@ This document captures proposed improvements for the ESP32 web interface firmwar
 - Allows quick prototyping without firmware rebuilds.
 
 ### 3.3 MQTT Configuration Page
-**Idea:** Add a configuration page to control MQTT publishing/subscribing. This also enables integration with the **MyOpenInverter** app.
+**Idea:** Add a configuration page to control MQTT publishing/subscribing. This also enables integration with a **MyOpenInverter** app.
 
 **Proposal:**
 - UI page where users define: 
@@ -103,9 +101,4 @@ This document captures proposed improvements for the ESP32 web interface firmwar
 
 **Benefits:**
 - Clear control of MQTT data flow.
-- Enables cloud integration and telemetry.
 
-## Next Steps (Suggested)
-1. Align on the transport abstraction and SDO class structure.
-2. Define parameter metadata (poll strategy, CAN-mapped, static).
-3. Prioritize the MQTT configuration page scope (MVP features).
