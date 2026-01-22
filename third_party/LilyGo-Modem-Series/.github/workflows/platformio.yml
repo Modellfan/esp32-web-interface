@@ -1,0 +1,90 @@
+name: PlatformIO CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    paths:
+      - "examples/**"
+      - "lib/**"
+      - ".github/workflows/platformio.yml"
+      - "platformio.ini"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        envs:
+          [
+            T-A7670X,
+            T-Call-A7670X-V1-0,
+            T-SIM7670G,
+            T-A7608X,
+            T-A7608X-S3,
+            T-SIM7600X
+            # T-Call-A7670X-V1-1,
+            # T-A7608X-DC-S3,
+          ]
+        examples:
+          - examples/ATdebug
+          - examples/Blynk_Console
+          - examples/DeepSleep
+          - examples/ExternalGPS_A7670G_Only
+          - examples/GPS_BuiltIn
+          - examples/GPS_NMEA_Parse
+          - examples/GPS_NMEA_Output
+          - examples/GPS_Acceleration
+          - examples/HttpClient
+          - examples/HttpsClient
+          - examples/LBSExample
+          - examples/ModemSleep
+          - examples/ModemPowerOff
+          - examples/MqttClient
+          - examples/Network
+          - examples/ReadBattery
+          - examples/SDCard
+          - examples/SendSMS
+          - examples/ReadSMS
+          - examples/SerialRS485
+          - examples/VoiceCalls
+          - examples/MqttsBuiltlnAuth
+          - examples/MqttsBuiltlnSSL
+          - examples/MqttsBuiltlnNoSSL
+          - examples/MqttsBuiltlnAWS
+          - examples/MqttsBuiltlnHivemq
+          - examples/HttpsBuiltlnGet
+          - examples/HttpsBuiltlnPost
+          - examples/MqttsBuiltlnEMQX
+          - examples/HttpsOTAUpgrade
+          - examples/HP303BSensor
+          - examples/SPIExample
+          - examples/SendLocationFromSMS
+          - examples/SendLocationFromSMS_Use_TinyGPS
+          - examples/PowerMonitoring
+          - examples/GPS_BuiltInEx
+          - examples/TextToSpeech
+          #- examples/ULP_Monitor
+
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.platformio/.cache
+          key: ${{ runner.os }}-pio
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.9"
+      - name: Install PlatformIO Core
+        run: pip install --upgrade platformio
+
+      - name: Run PlatformIO
+        run: |
+          if [ -f "${{ matrix.examples }}/.skip."${{ matrix.envs }} ];then
+            echo "Skip" ${{ matrix.examples }}
+          else
+            export PLATFORMIO_SRC_DIR=${{ matrix.examples }}
+            pio run -e  ${{ matrix.envs }}
+          fi
