@@ -33,6 +33,8 @@ var ui = {
 	categoryVisible: {},
 
 	navbarIsBig: true,
+	activePage: "dashboard",
+	spotValueStorageKey: "spotValueSelections",
 
   shrinkNavbar: function() {
 		document.getElementById("navbar").style.width = "60px";
@@ -89,6 +91,7 @@ var ui = {
 	/** @brief switch to a different page tab */
 	openPage: function(pageName, elmnt, color)
 	{
+		ui.activePage = pageName;
 		// hide all tabs
 	    var i, tabdiv, tablinks;
 	    tabdiv = document.getElementsByClassName("tabdiv");
@@ -149,8 +152,13 @@ var ui = {
 	/** @brief automatically update data on the UI */
 	refresh: function()
 	{
-		ui.updateTables();
-		ui.refreshStatusBox();
+		if (ui.activePage === "spotvalues") {
+			ui.refreshSpotValues();
+		}
+		else {
+			ui.updateTables();
+			ui.refreshStatusBox();
+		}
 	},
 
 	getNodeId: function() {
@@ -319,7 +327,11 @@ var ui = {
 						display = param.value;
 					}
 
-					ui.addRow(tableSpot, [ nameWithTooltip, display, unit ], true);
+					var isSelected = ui.isSpotValueSelected(name);
+					var checkboxHtml = '<INPUT type="checkbox" class="spot-value-toggle" data-name="' + name +
+						'" onchange="ui.toggleSpotValueSelection(this)"' + (isSelected ? ' checked' : '') + ' />';
+					var spotRow = ui.addRow(tableSpot, [ checkboxHtml, nameWithTooltip, display, unit ], true);
+					spotRow.dataset.spotValue = name;
 				}
 			}
       ui.populateVersion();
@@ -347,6 +359,99 @@ var ui = {
 			cell.colSpan = colSpan;
 			cell.innerHTML = content[i];
 		}
+		return tr;
+	},
+
+	getSpotValueSelections: function()
+	{
+		try {
+			var raw = localStorage.getItem(ui.spotValueStorageKey);
+			return raw ? JSON.parse(raw) : {};
+		} catch (e) {
+			return {};
+		}
+	},
+
+	setSpotValueSelections: function(selections)
+	{
+		try {
+			localStorage.setItem(ui.spotValueStorageKey, JSON.stringify(selections));
+		} catch (e) {}
+	},
+
+	isSpotValueSelected: function(name)
+	{
+		var selections = ui.getSpotValueSelections();
+		if (name in selections) {
+			return selections[name];
+		}
+		return true;
+	},
+
+	setSpotValueSelection: function(name, selected)
+	{
+		var selections = ui.getSpotValueSelections();
+		selections[name] = selected;
+		ui.setSpotValueSelections(selections);
+	},
+
+	toggleSpotValueSelection: function(checkbox)
+	{
+		var name = checkbox.dataset.name;
+		ui.setSpotValueSelection(name, checkbox.checked);
+		var row = checkbox.closest("tr");
+		if (row && row.cells.length > 2) {
+			if (!checkbox.checked) {
+				row.cells[2].textContent = "-";
+			}
+			else {
+				ui.refreshSpotValues();
+			}
+		}
+	},
+
+	getSelectedSpotValueNames: function()
+	{
+		var selected = [];
+		var checkboxes = document.querySelectorAll('#spotBody .spot-value-toggle');
+		for (var i = 0; i < checkboxes.length; i++)
+		{
+			if (checkboxes[i].checked) {
+				selected.push(checkboxes[i].dataset.name);
+			}
+		}
+		return selected;
+	},
+
+	refreshSpotValues: function()
+	{
+		var selected = ui.getSelectedSpotValueNames();
+		if (!selected.length) {
+			return;
+		}
+
+		inverter.getValues(selected, 1, function(values)
+		{
+			for (var i = 0; i < selected.length; i++)
+			{
+				var name = selected[i];
+				if (!values[name] || !values[name].length) {
+					continue;
+				}
+				var entry = paramsCache.getEntry(name);
+				if (entry) {
+					entry.value = values[name][0];
+				}
+				var displayValue = values[name][0];
+				if (entry && entry.enums && entry.enums[displayValue] !== undefined) {
+					displayValue = entry.enums[displayValue];
+				}
+				var row = document.querySelector('#spotBody tr[data-spot-value="' + name + '"]');
+				if (row && row.cells.length > 2) {
+					row.cells[2].textContent = displayValue;
+				}
+			}
+		});
 	},
 
 	/** @brief fill out version box in the bottom left corner of the screen */
