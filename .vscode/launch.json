@@ -13,12 +13,12 @@
             "request": "launch",
             "name": "PIO Debug",
             "executable": "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/.pio/build/release/firmware.elf",
-            "projectEnvName": "debug",
+            "projectEnvName": "release",
             "toolchainBinDir": "C:/Users/Win11 Pro/.platformio/packages/toolchain-xtensa-esp32/bin",
             "internalConsoleOptions": "openOnSessionStart",
             "preLaunchTask": {
                 "type": "PlatformIO",
-                "task": "Pre-Debug"
+                "task": "Pre-Debug (release)"
             }
         },
         {
@@ -26,7 +26,7 @@
             "request": "launch",
             "name": "PIO Debug (skip Pre-Debug)",
             "executable": "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/.pio/build/release/firmware.elf",
-            "projectEnvName": "debug",
+            "projectEnvName": "release",
             "toolchainBinDir": "C:/Users/Win11 Pro/.platformio/packages/toolchain-xtensa-esp32/bin",
             "internalConsoleOptions": "openOnSessionStart"
         },
@@ -35,7 +35,7 @@
             "request": "launch",
             "name": "PIO Debug (without uploading)",
             "executable": "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/.pio/build/release/firmware.elf",
-            "projectEnvName": "debug",
+            "projectEnvName": "release",
             "toolchainBinDir": "C:/Users/Win11 Pro/.platformio/packages/toolchain-xtensa-esp32/bin",
             "internalConsoleOptions": "openOnSessionStart",
             "loadMode": "manual"
