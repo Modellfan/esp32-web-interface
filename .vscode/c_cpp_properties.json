@@ -9,7 +9,8 @@
             "name": "PlatformIO",
             "includePath": [
                 "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface",
-                "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/third_party/LilyGo-Modem-Series/lib/TinyGSM/src",
+                "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/third_party/LilyGo-Modem-Series/lib/StreamDebugger",
+                "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/.pio/libdeps/gsm_test2/TinyGSM Fork/src",
                 "C:/Users/Win11 Pro/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/newlib/platform_include",
                 "C:/Users/Win11 Pro/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/freertos/include",
                 "C:/Users/Win11 Pro/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/freertos/include/esp_additions/freertos",
@@ -222,8 +223,8 @@
                 "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/third_party/LilyGo-Modem-Series/lib/LMIC-Arduino/src",
                 "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/third_party/LilyGo-Modem-Series/lib/RadioLib/src",
                 "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/third_party/LilyGo-Modem-Series/lib/SensorLib/src",
-                "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/third_party/LilyGo-Modem-Series/lib/StreamDebugger",
                 "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/third_party/LilyGo-Modem-Series/lib/TinyGPSPlus/src",
+                "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/third_party/LilyGo-Modem-Series/lib/TinyGSM/src",
                 "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/third_party/LilyGo-Modem-Series/lib/arduino-LoRa/src",
                 "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/third_party/LilyGo-Modem-Series/lib/pubsubclient/src",
                 "C:/Users/Win11 Pro/.platformio/packages/framework-arduinoespressif32/libraries/ArduinoOTA/src",
@@ -265,7 +266,8 @@
                 "limitSymbolsToIncludedHeaders": true,
                 "path": [
                     "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface",
-                    "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/third_party/LilyGo-Modem-Series/lib/TinyGSM/src",
+                    "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/third_party/LilyGo-Modem-Series/lib/StreamDebugger",
+                    "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/.pio/libdeps/gsm_test2/TinyGSM Fork/src",
                     "C:/Users/Win11 Pro/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/newlib/platform_include",
                     "C:/Users/Win11 Pro/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/freertos/include",
                     "C:/Users/Win11 Pro/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/freertos/include/esp_additions/freertos",
@@ -478,8 +480,8 @@
                     "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/third_party/LilyGo-Modem-Series/lib/LMIC-Arduino/src",
                     "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/third_party/LilyGo-Modem-Series/lib/RadioLib/src",
                     "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/third_party/LilyGo-Modem-Series/lib/SensorLib/src",
-                    "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/third_party/LilyGo-Modem-Series/lib/StreamDebugger",
                     "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/third_party/LilyGo-Modem-Series/lib/TinyGPSPlus/src",
+                    "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/third_party/LilyGo-Modem-Series/lib/TinyGSM/src",
                     "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/third_party/LilyGo-Modem-Series/lib/arduino-LoRa/src",
                     "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/third_party/LilyGo-Modem-Series/lib/pubsubclient/src",
                     "C:/Users/Win11 Pro/.platformio/packages/framework-arduinoespressif32/libraries/ArduinoOTA/src",
@@ -519,7 +521,7 @@
                 ]
             },
             "defines": [
-                "PLATFORMIO=60118",
+                "PLATFORMIO=60119",
                 "ARDUINO_ESP32_DEV",
                 "HAVE_CONFIG_H",
                 "MBEDTLS_CONFIG_FILE=\"mbedtls/esp_config.h\"",
