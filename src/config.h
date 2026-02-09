@@ -7,6 +7,8 @@ typedef struct {
     int canRXPin;
     int canTXPin;
     int canEnablePin;
+    int nodeId;
+    int canSpeed;
 } EEPROMSettings;
 
 
@@ -24,6 +26,12 @@ class Config
 
     int getCanEnablePin();
     void setCanEnablePin(int pin);
+
+    int getNodeId();
+    void setNodeId(int nodeId);
+
+    int getCanSpeed();
+    void setCanSpeed(int canSpeed);
 
     void saveSettings();
   private:
