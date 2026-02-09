@@ -734,12 +734,12 @@ void setup(void){
 
   //initialise SD card in SDIO mode
   //if (SD_MMC.begin("/sdcard", true, false, 40000, 5U)) {
-  if (SD_MMC.begin()) {
-    DBG_OUTPUT_PORT.println("Started SD_MMC");
-    haveSDCard = true;
-  }
-  else
-    DBG_OUTPUT_PORT.println("Couldn't start SD_MMC");
+  // if (SD_MMC.begin()) {
+  //   DBG_OUTPUT_PORT.println("Started SD_MMC");
+  //   haveSDCard = true;
+  // }
+  // else
+  //   DBG_OUTPUT_PORT.println("Couldn't start SD_MMC");
 
   //Start SPI Flash file system
   SPIFFS.begin();
@@ -754,6 +754,8 @@ void setup(void){
   WiFi.setTxPower(WIFI_POWER_19_5dBm);//25); //dbm
   WiFi.begin();
   sta_tick.attach(10, staCheck);
+
+  DBG_OUTPUT_PORT.println("WIFI Started");
 
   MDNS.begin(host);
 
