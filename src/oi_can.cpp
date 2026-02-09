@@ -74,6 +74,11 @@ static File updateFile;
 static int currentPage = 0;
 static const size_t PAGE_SIZE_BYTES = 1024;
 static int retries = 0;
+static uint32_t lastStartupRequestMs = 0;
+static int startupRetryCount = 0;
+
+constexpr uint32_t STARTUP_RETRY_INTERVAL_MS = 250;
+constexpr int STARTUP_RETRY_LOG_INTERVAL = 20;
 
 static void requestSdoElement(uint16_t index, uint8_t subIndex) {
   tx_frame.extd = false;
@@ -137,8 +142,11 @@ static void handleSdoResponse(twai_message_t *rxframe) {
   static File file;
 
   if (rxframe->data[0] == SDO_ABORT) { //SDO abort
-    state = ERROR;
-    DBG_OUTPUT_PORT.println("Error obtaining serial number, try restarting");
+    state = OBTAINSERIAL;
+    requestSdoElement(SDO_INDEX_SERIAL, 0);
+    lastStartupRequestMs = millis();
+    startupRetryCount++;
+    DBG_OUTPUT_PORT.println("SDO abort while obtaining serial number, retrying");
     return;
   }
 
@@ -156,6 +164,7 @@ static void handleSdoResponse(twai_message_t *rxframe) {
 
           if (SPIFFS.exists(jsonFileName)) {
             state = IDLE;
+            startupRetryCount = 0;
             DBG_OUTPUT_PORT.println("json file already downloaded");
           }
           else {
@@ -175,6 +184,7 @@ static void handleSdoResponse(twai_message_t *rxframe) {
         file.close();
         DBG_OUTPUT_PORT.println("Download complete");
         state = IDLE;
+        startupRetryCount = 0;
       }
       //Receiving a segment
       else if (rxframe->data[0] == (toggleBit << 4) && (rxframe->data[0] & SDO_READ) == 0) {
@@ -737,7 +747,9 @@ void Init(uint8_t nodeId, BaudRate baud, int txPin, int rxPin) {
 
   _nodeId = nodeId;
   state = OBTAINSERIAL;
+  startupRetryCount = 0;
   requestSdoElement(SDO_INDEX_SERIAL, 0);
+  lastStartupRequestMs = millis();
   DBG_OUTPUT_PORT.println("Initialized CAN");
 }
 
@@ -754,6 +766,17 @@ void Loop() {
       handleUpdate(&rxframe);
     else
       DBG_OUTPUT_PORT.printf("Received unwanted frame %" PRIu32 "\r\n", rxframe.identifier);
+  }
+
+  if (state == OBTAINSERIAL &&
+      (millis() - lastStartupRequestMs >= STARTUP_RETRY_INTERVAL_MS)) {
+    requestSdoElement(SDO_INDEX_SERIAL, 0);
+    lastStartupRequestMs = millis();
+    startupRetryCount++;
+
+    if (startupRetryCount % STARTUP_RETRY_LOG_INTERVAL == 0) {
+      DBG_OUTPUT_PORT.printf("CAN init pending, retry count %d\r\n", startupRetryCount);
+    }
   }
 
   if (updstate == REQUEST_JSON) {
