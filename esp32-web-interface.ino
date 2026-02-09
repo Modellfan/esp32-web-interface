@@ -596,10 +596,16 @@ static void handleNodeId()
     int speed = server.arg("canspeed").toInt();
     OICan::BaudRate baud = speed == 0 ? OICan::Baud125k : (speed == 1 ? OICan::Baud250k : OICan::Baud500k);
     OICan::Init(id, baud, config.getCanTXPin(), config.getCanRXPin());
+    config.setNodeId(id);
+    config.setCanSpeed(speed);
+    config.saveSettings();
   }
   else if(server.hasArg("id")) {
     int id = server.arg("id").toInt();
     OICan::Init(id, OICan::Baud500k, config.getCanTXPin(), config.getCanRXPin());
+    config.setNodeId(id);
+    config.setCanSpeed(2);
+    config.saveSettings();
   }
 
   server.send(200, "text/plain", String(OICan::GetNodeId()) + "," + String(OICan::GetBaudRate()));
@@ -764,7 +770,8 @@ void setup(void){
     digitalWrite(config.getCanEnablePin(), LOW);
   }
 
-  OICan::Init(1, OICan::Baud500k, config.getCanTXPin(), config.getCanRXPin());
+  OICan::BaudRate baud = config.getCanSpeed() == 0 ? OICan::Baud125k : (config.getCanSpeed() == 1 ? OICan::Baud250k : OICan::Baud500k);
+  OICan::Init(config.getNodeId(), baud, config.getCanTXPin(), config.getCanRXPin());
 
   updater.setup(&server);
 
