@@ -125,7 +125,7 @@
 			</div>
 
       <div>
-				<a class="tablink" onclick="ui.openPage('dashboard', this, 'white')" style="background-color:white">
+				<a id="dashboard-tablink" class="tablink" onclick="ui.openPage('dashboard', this, 'white')" style="background-color:white">
 					<!-- /icon-grid.png -->
 					<img class="navimg" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAAACXBIWXMAAA7DAAAOwwHHb6hkAAAAGXRFWHRTb2Z0d2FyZQB3d3cuaW5rc2NhcGUub3Jnm+48GgAAAFpJREFUSIljYBhO4DADA8N/PPgwOWoZkTT9J8IRMPVEq2XBYwgywGUgQbVMRLiEIjBqAUGALZKJSSFEq0X2wRECao/gYBNSO4zAaFGBVe3Qz2hD34LRomLgAQDIVzQ/KtRExgAAAABJRU5ErkJggg=="><p class="navbar-text">DASHBOARD</p></a>
 				<a class="tablink" onclick="ui.openPage('update', this, 'white')">
@@ -158,6 +158,8 @@
 				<a class="tablink" onclick="ui.openPage('support', this, 'white')">
 					<!-- /icon-help-circle.png -->
 					<img class="navimg" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAAACXBIWXMAAA7DAAAOwwHHb6hkAAAAGXRFWHRTb2Z0d2FyZQB3d3cuaW5rc2NhcGUub3Jnm+48GgAAAdRJREFUSInF1T1rlEEUBeBHYpHFJZDFQkhqsxELwdrPwlLtLP0g+heU+Ee0sLIViRYWJgGjEFBT6ppEsDGFNsYQLSUWc4d9s072fSOIB6Y598y5l7kzd/jHOFAT7+AyLqKLyeA3sIqnmMO3/SZuYRZb2KlZ30Pbamo+iZWKwXPMYAqHYnVxE/MV3QommphvxIY1nG5Q0Bmsx56NYUlalcpfYLyBecY4lmLvG4yWRLP6lQ+an8Az/MBXPCxU2sHH8LgzaN7Rb+jgsZzET3829wuODGjP6jd+V5E39Bs6iNzIBxiT+rQQ3L2CPseuVcm5IGcKGx6hJ92ejOOhf1fQ34rY4yq5FuRUYUMJF4Yk6EZstUpuB9muMR6RjjPr7xY07Yht7zfBSFScm3w/uEGMRXyrSjY5opyghyv2nmO7juhgkD0cxalIVsIvqbl1yNf8fZW8HlnnGxjUYTG8rlbJjvQ4dqTZshdeYXlI/Hx4bCqMmjwqPuHwXySojorbJcEo3oZgqVTBEHTwUs2wIw2wPK7XpdlSh3P6lX/W4E+YiCryfV+Qnv+09E7aOBbcYkX3uol5xqg0cnPjh61N6cyLx1L36Y/jkvTpT9v96X+QPv0nkeT/4DdxyppwcyvRBAAAAABJRU5ErkJggg=="><p class="navbar-text">SUPPORT</p></a>
+				<a class="tablink" onclick="ui.openPage('ui', this, 'white')">
+					<p class="navbar-text">UI</p></a>
 			</div>
 
       <div id="nodeid-div" class="control small-screen-hide">
@@ -570,6 +572,8 @@
 						<a href="/remote.html"><button>
 							<!-- /icon-tool.png -->
 							<img class="buttonimg" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAAACXBIWXMAAA7DAAAOwwHHb6hkAAAAGXRFWHRTb2Z0d2FyZQB3d3cuaW5rc2NhcGUub3Jnm+48GgAAAUdJREFUSInl1M8uBEEQx/HPcmbj33IQVxJeQ4Q34U6WFV7FS/hzccGFOHEgvMAiER6AdeiaZIwsM6xEopJOd1dXf6vnN9XNH7RxNHGOx2gnaGHgp/Al3KPTpS3/FP4aoF0sYBo34bvE6HfhE3gI0BZqaAQ0gzcidgQrKsrVDNBewOtd4PmkrSoJzmPTQsw3voB3cAx9JRNMRX8afaew3sAh5nAbvtnSx8dTQAdjXpQoP56JcbtKgpPYtFg4dV6STK6lmJ+VhTdwHZuahbU61sNflwrgIGLXysLzn/9ZndewHbF30o2vBM+qZQybklyjGJZk2Y/YV++lrAQv6l5sd72CX+NIeugepPJdzcV2tTFcBORKeiI+81eyoRInz/sr285vwmt4xgsmew3PErQDNh9JegbPbMvHsusZHPojSVuSa0f68f/c3gAXBoY3A6QNPQAAAABJRU5ErkJggg==">Start remote support session</button></a>
+						<a href="/interactive-docs.html"><button>
+							<img class="buttonimg" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAAACXBIWXMAAA7DAAAOwwHHb6hkAAAAGXRFWHRTb2Z0d2FyZQB3d3cuaW5rc2NhcGUub3Jnm+48GgAAAQhJREFUSInN1LFKA0EQgOHvFhY2NhaWSfABPAkewM4jWAQviFfQ1t5DKG5jY2VhI2PjAaxEsLJQWCm2NgmBxd6WZZA6M3f2zD7z8w3mR7ehhnvKJ+AKXvE9+IBN7GR3wQFWsRlX8Jf6hTdr2MUt6sEe1rETr7iFEa6xjN2r9Y4AnA2j7W7blwIYX9NWO8A1LFBQ1h8ClQKxQGfLsE6fAkngmM8yqL4M4SpgD0UBNA0N5wJwTBhVcAAqJQvM+v9eQ5HMc8kGftwltA3ES8kNwOGa9vE4Rr6zvC2sg1Q8T2v5fgrPma4V0sn1Qm3wS9gAX+bN1vUQ8b4AAAAASUVORK5CYII=">Open docs state machine demo</button></a>
 					</div>
 					<div class="main-left">
 						<h2>Support</h2>
@@ -578,6 +582,12 @@
 					</div>
 				</div>
 				<!-- END SUPPORT -->
+
+				<!-- UI -->
+				<div id="ui" class="tabdiv ui-fullscreen">
+					<button class="ui-close-button" onclick="ui.closeUiPage();" aria-label="Close UI page">x</button>
+				</div>
+				<!-- END UI -->
 
 			</div> <!-- end content-wrapper -->
 		</div> <!-- end content-wrapper-inner -->

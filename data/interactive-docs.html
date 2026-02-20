@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Interactive Documentation Demo</title>
+  <style>
+    :root {
+      --bg: #f1f5f9;
+      --panel: #ffffff;
+      --text: #0f172a;
+      --muted: #475569;
+      --accent: #0369a1;
+      --border: #cbd5e1;
+    }
+    body {
+      margin: 0;
+      font-family: Verdana, sans-serif;
+      color: var(--text);
+      background: linear-gradient(145deg, #e2e8f0, var(--bg));
+    }
+    .wrap {
+      max-width: 980px;
+      margin: 26px auto;
+      padding: 0 16px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 18px;
+      box-shadow: 0 8px 24px rgba(2, 6, 23, 0.08);
+      margin-bottom: 16px;
+    }
+    h1 {
+      margin-top: 0;
+      font-size: 28px;
+    }
+    p {
+      color: var(--muted);
+      line-height: 1.45;
+    }
+    .actions {
+      margin-top: 12px;
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    button, a.btn {
+      border: 0;
+      border-radius: 8px;
+      background: var(--accent);
+      color: #fff;
+      text-decoration: none;
+      padding: 10px 14px;
+      font-size: 14px;
+      cursor: pointer;
+      display: inline-block;
+    }
+    .code {
+      font-family: "Courier New", monospace;
+      font-size: 13px;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      padding: 12px;
+      white-space: pre-wrap;
+    }
+    .mermaid {
+      overflow-x: auto;
+      padding: 4px 0;
+    }
+  </style>
+  <script src="mermaid.min.js"></script>
+  <script>
+    document.addEventListener("DOMContentLoaded", function () {
+      mermaid.initialize({ startOnLoad: false });
+      mermaid.run();
+      document.getElementById("rerender").addEventListener("click", function () {
+        var src = document.getElementById("diagram-source").value;
+        var target = document.getElementById("diagram");
+        target.textContent = src;
+        mermaid.run();
+      });
+    });
+  </script>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>Interactive Documentation Demo</h1>
+      <p>This page demonstrates a local Mermaid-style state machine renderer with no external CDN dependencies.</p>
+      <div class="actions">
+        <a class="btn" href="/">Back to Console</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>State Machine</h2>
+      <div id="diagram" class="mermaid">
+stateDiagram-v2
+Idle --> Precharge: Start
+Precharge --> Ready: Voltage ok
+Ready --> Drive: Enable
+Drive --> Fault: Overcurrent
+Fault --> Idle: Reset
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Edit Diagram</h2>
+      <p>Change transitions and click render to refresh the visualization.</p>
+      <textarea id="diagram-source" class="code" rows="8">stateDiagram-v2
+Idle --> Precharge: Start
+Precharge --> Ready: Voltage ok
+Ready --> Drive: Enable
+Drive --> Fault: Overcurrent
+Fault --> Idle: Reset</textarea>
+      <div class="actions">
+        <button id="rerender" type="button">Render Diagram</button>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
