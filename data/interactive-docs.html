@@ -70,18 +70,403 @@
       overflow-x: auto;
       padding: 4px 0;
     }
+    .debug-panel {
+      display: none;
+      margin-top: 12px;
+      padding: 10px;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      background: #f8fafc;
+      font-family: "Courier New", monospace;
+      font-size: 12px;
+      color: #1f2937;
+      white-space: pre-wrap;
+    }
   </style>
   <script src="mermaid.min.js"></script>
   <script>
     document.addEventListener("DOMContentLoaded", function () {
-      mermaid.initialize({ startOnLoad: false });
-      mermaid.run();
+      mermaid.initialize({ startOnLoad: false, securityLevel: "loose" });
+      var target = document.getElementById("diagram");
+      var sourceInput = document.getElementById("diagram-source");
+      var delayInput = document.getElementById("tick-delay");
+      var liveState = document.getElementById("live-state");
+      var debugPanel = document.getElementById("debug-panel");
+      var debugPanelText = document.getElementById("debug-panel-text");
+      var timerId = null;
+      var transitions = [];
+      var stateList = [];
+      var stateIdMap = {};
+      var currentState = "";
+      var lastTransitionIndex = -1;
+      var stateMetrics = {};
+      var renderDebug = {
+        statesMatched: 0,
+        edgesMatched: 0,
+        selectorCounts: {
+          stateGroup: 0,
+          transitionGroup: 0,
+          fallbackPath: 0,
+          shapeCandidates: 0,
+          stateNameTexts: 0
+        },
+        matchedNodeNames: [],
+        edgeSource: "none"
+      };
+
+      function setDebugPanelVisible(visible) {
+        debugPanel.style.display = visible ? "block" : "none";
+      }
+
+      function updateDebugPanel() {
+        var names = renderDebug.matchedNodeNames.length ? renderDebug.matchedNodeNames.join(", ") : "none";
+        debugPanelText.textContent =
+          "selectors:\n" +
+          "  g.stateGroup = " + renderDebug.selectorCounts.stateGroup + "\n" +
+          "  g.transition = " + renderDebug.selectorCounts.transitionGroup + "\n" +
+          "  fallback paths = " + renderDebug.selectorCounts.fallbackPath + "\n" +
+          "  shape candidates = " + renderDebug.selectorCounts.shapeCandidates + "\n" +
+          "  state-name texts = " + renderDebug.selectorCounts.stateNameTexts + "\n" +
+          "matched nodes (first 5): " + names + "\n" +
+          "edge source: " + renderDebug.edgeSource + "\n" +
+          "edge count used: " + renderDebug.edgesMatched;
+      }
+
+      function clamp(value, min, max) {
+        return Math.min(max, Math.max(min, value));
+      }
+
+      function initStateMetrics(stateName, index) {
+        if (!stateMetrics[stateName]) {
+          stateMetrics[stateName] = {
+            temperature: 28 + index * 2 + Math.random() * 2,
+            voltage: 315 + index * 8 + Math.random() * 3
+          };
+        }
+      }
+
+      function updateMetricsForStep() {
+        var keys = Object.keys(stateMetrics);
+        for (var i = 0; i < keys.length; i++) {
+          var entry = stateMetrics[keys[i]];
+          // Keep values drifting slowly so live behavior is visible.
+          entry.temperature = clamp(entry.temperature + (Math.random() - 0.5) * 1.2, 20, 120);
+          entry.voltage = clamp(entry.voltage + (Math.random() - 0.5) * 3.0, 180, 460);
+        }
+      }
+
+      function parseTransitions(src) {
+        var lines = src.split(/\r?\n/);
+        var parsed = [];
+        for (var i = 0; i < lines.length; i++) {
+          var line = lines[i].trim();
+          if (!line || line.indexOf("stateDiagram") === 0 || line.indexOf("%%") === 0) {
+            continue;
+          }
+          var m = line.match(/^([^\-:]+?)\s*-->\s*([^:]+?)(?:\s*:\s*(.+))?$/);
+          if (m) {
+            parsed.push({
+              from: m[1].trim(),
+              to: m[2].trim(),
+              label: m[3] ? m[3].trim() : ""
+            });
+          }
+        }
+        return parsed;
+      }
+
+      function buildDiagramSource() {
+        // Build a stable stateDiagram-v2 from parsed transitions so we can
+        // reliably apply class-based highlighting to state IDs.
+        var lines = [
+          "stateDiagram-v2",
+          "direction TB",
+          "classDef activeState fill:#dcfce7,stroke:green,stroke-width:3px;"
+        ];
+
+        stateIdMap = {};
+        for (var i = 0; i < stateList.length; i++) {
+          var name = stateList[i];
+          var id = "st_" + i;
+          stateIdMap[name] = id;
+          var m = stateMetrics[name];
+          var metricText = m
+            ? " (T " + m.temperature.toFixed(1) + " C, V " + m.voltage.toFixed(1) + " V)"
+            : "";
+          var label = (name + metricText).replace(/"/g, '\\"');
+          lines.push('state "' + label + '" as ' + id);
+        }
+
+        for (var t = 0; t < transitions.length; t++) {
+          var tr = transitions[t];
+          var fromId = stateIdMap[tr.from];
+          var toId = stateIdMap[tr.to];
+          if (!fromId || !toId) {
+            continue;
+          }
+          var transitionLine = fromId + " --> " + toId;
+          if (tr.label) {
+            transitionLine += " : " + tr.label;
+          }
+          lines.push(transitionLine);
+        }
+
+        if (currentState && stateIdMap[currentState]) {
+          lines.push("class " + stateIdMap[currentState] + " activeState");
+        }
+
+        return lines.join("\n");
+      }
+
+      function decorateRenderedDiagram(retryCount) {
+        retryCount = retryCount || 0;
+        var svg = target.querySelector("svg");
+        if (!svg) {
+          if (retryCount < 12) {
+            setTimeout(function () { decorateRenderedDiagram(retryCount + 1); }, 40);
+          }
+          return;
+        }
+
+        var groups = svg.querySelectorAll("g.stateGroup");
+        renderDebug.selectorCounts.stateGroup = groups.length;
+        var shapeCandidates = Array.from(svg.querySelectorAll("rect, ellipse, circle, polygon, path"))
+          .filter(function (el) {
+            if (el.closest("defs")) {
+              return false;
+            }
+            if ((el.getAttribute("class") || "").indexOf("transition") !== -1) {
+              return false;
+            }
+            if (el.closest("g.transition")) {
+              return false;
+            }
+            return true;
+          });
+        renderDebug.selectorCounts.shapeCandidates = shapeCandidates.length;
+        renderDebug.selectorCounts.stateNameTexts = Array.from(svg.querySelectorAll("text, tspan"))
+          .filter(function (el) {
+            var txt = (el.textContent || "").trim();
+            for (var si = 0; si < stateList.length; si++) {
+              if (txt === stateList[si] || txt.indexOf(stateList[si] + " (T ") === 0) {
+                return true;
+              }
+            }
+            return false;
+          }).length;
+
+        var transitionGroups = Array.from(svg.querySelectorAll("g.transition"));
+        renderDebug.selectorCounts.transitionGroup = transitionGroups.length;
+        var edgePaths = [];
+        for (var tg = 0; tg < transitionGroups.length; tg++) {
+          var p = transitionGroups[tg].querySelector("path");
+          if (p) {
+            edgePaths.push(p);
+          }
+        }
+        var fallbackPaths = Array.from(svg.querySelectorAll("path.transition, .edgePaths path, .edgePath path, path[marker-end]"))
+          .filter(function (p, idx, arr) { return !p.closest("defs") && arr.indexOf(p) === idx; });
+        renderDebug.selectorCounts.fallbackPath = fallbackPaths.length;
+        if (!edgePaths.length) {
+          edgePaths = fallbackPaths;
+          renderDebug.edgeSource = "fallback";
+        } else {
+          renderDebug.edgeSource = "g.transition";
+        }
+        renderDebug.statesMatched = currentState && stateIdMap[currentState] ? 1 : 0;
+        renderDebug.edgesMatched = edgePaths.length;
+        renderDebug.matchedNodeNames = currentState ? [currentState] : [];
+        for (var e = 0; e < edgePaths.length; e++) {
+          edgePaths[e].removeAttribute("stroke");
+          edgePaths[e].removeAttribute("stroke-width");
+        }
+        Array.from(svg.querySelectorAll(".active-edge-overlay, #active-edge-arrowhead")).forEach(function (el) {
+          el.remove();
+        });
+
+        function centerOf(el) {
+          try {
+            var b = el.getBBox();
+            return { x: b.x + b.width / 2, y: b.y + b.height / 2, box: b };
+          } catch (e) {
+            return null;
+          }
+        }
+
+        function stateCenterByName(name) {
+          var labelNodes = Array.from(svg.querySelectorAll("text, tspan"))
+            .filter(function (n) {
+              var t = (n.textContent || "").trim();
+              return t === name || t.indexOf(name + " (T ") === 0;
+            });
+          if (!labelNodes.length) {
+            return null;
+          }
+          var textCenter = centerOf(labelNodes[0]);
+          if (!textCenter) {
+            return null;
+          }
+
+          var best = null;
+          var bestDist = Number.POSITIVE_INFINITY;
+          for (var i = 0; i < shapeCandidates.length; i++) {
+            var sc = centerOf(shapeCandidates[i]);
+            if (!sc) {
+              continue;
+            }
+            var dx = sc.x - textCenter.x;
+            var dy = sc.y - textCenter.y;
+            var d = Math.sqrt(dx * dx + dy * dy);
+            if (d < bestDist) {
+              bestDist = d;
+              best = sc;
+            }
+          }
+          return best && bestDist < 260 ? best : textCenter;
+        }
+
+        if (lastTransitionIndex >= 0 && transitions[lastTransitionIndex]) {
+          var tr = transitions[lastTransitionIndex];
+          var from = stateCenterByName(tr.from);
+          var to = stateCenterByName(tr.to);
+          if (from && to) {
+            var ns = "http://www.w3.org/2000/svg";
+            var defs = svg.querySelector("defs");
+            if (!defs) {
+              defs = document.createElementNS(ns, "defs");
+              svg.insertBefore(defs, svg.firstChild);
+            }
+
+            var marker = document.createElementNS(ns, "marker");
+            marker.setAttribute("id", "active-edge-arrowhead");
+            marker.setAttribute("viewBox", "0 0 10 10");
+            marker.setAttribute("refX", "9");
+            marker.setAttribute("refY", "5");
+            marker.setAttribute("markerWidth", "7");
+            marker.setAttribute("markerHeight", "7");
+            marker.setAttribute("orient", "auto-start-reverse");
+            var arrowPath = document.createElementNS(ns, "path");
+            arrowPath.setAttribute("d", "M 0 0 L 10 5 L 0 10 z");
+            arrowPath.setAttribute("fill", "green");
+            marker.appendChild(arrowPath);
+            defs.appendChild(marker);
+
+            var mx = (from.x + to.x) / 2;
+            var my = (from.y + to.y) / 2;
+            var dx = to.x - from.x;
+            var dy = to.y - from.y;
+            var len = Math.sqrt(dx * dx + dy * dy) || 1;
+            var nx = -dy / len;
+            var ny = dx / len;
+            var curve = Math.min(48, Math.max(18, len * 0.12));
+            var cx = mx + nx * curve;
+            var cy = my + ny * curve;
+
+            var overlay = document.createElementNS(ns, "path");
+            overlay.setAttribute("class", "active-edge-overlay");
+            overlay.setAttribute("d", "M " + from.x + " " + from.y + " Q " + cx + " " + cy + " " + to.x + " " + to.y);
+            overlay.setAttribute("fill", "none");
+            overlay.setAttribute("stroke", "green");
+            overlay.setAttribute("stroke-width", "4");
+            overlay.setAttribute("stroke-linecap", "round");
+            overlay.setAttribute("marker-end", "url(#active-edge-arrowhead)");
+            svg.appendChild(overlay);
+            renderDebug.edgeSource = "overlay";
+            renderDebug.edgesMatched = 1;
+          }
+        }
+      }
+
+      function updateLiveText() {
+        var last = lastTransitionIndex >= 0
+          ? transitions[lastTransitionIndex].from + " -> " + transitions[lastTransitionIndex].to
+          : "none";
+        var currentMetrics = stateMetrics[currentState];
+        var liveValues = currentMetrics
+          ? " | Temp: " + currentMetrics.temperature.toFixed(1) + " C | Voltage: " + currentMetrics.voltage.toFixed(1) + " V"
+          : "";
+        liveState.textContent =
+          "Current state: " + (currentState || "n/a") +
+          " | Last transition: " + last +
+          liveValues +
+          " | Decorator: states " + renderDebug.statesMatched + "/" + stateList.length +
+          ", edges " + renderDebug.edgesMatched + "/" + transitions.length;
+        updateDebugPanel();
+      }
+
+      function renderCurrent() {
+        target.textContent = buildDiagramSource();
+        target.removeAttribute("data-processed");
+        Promise.resolve(mermaid.run({ nodes: [target] }))
+          .then(function () {
+            decorateRenderedDiagram();
+            updateLiveText();
+          })
+          .catch(function (err) {
+            liveState.textContent = "Render error: " + (err && err.message ? err.message : err);
+          });
+      }
+
+      function resetSimulation() {
+        transitions = parseTransitions(sourceInput.value);
+        stateMetrics = {};
+        stateList = [];
+        stateIdMap = {};
+        for (var i = 0; i < transitions.length; i++) {
+          if (stateList.indexOf(transitions[i].from) === -1) {
+            stateList.push(transitions[i].from);
+          }
+          if (stateList.indexOf(transitions[i].to) === -1) {
+            stateList.push(transitions[i].to);
+          }
+        }
+        for (var j = 0; j < stateList.length; j++) {
+          initStateMetrics(stateList[j], j);
+        }
+        currentState = transitions.length ? transitions[0].from : "";
+        lastTransitionIndex = -1;
+        renderCurrent();
+      }
+
+      function stepSimulation() {
+        if (!transitions.length) {
+          return;
+        }
+        updateMetricsForStep();
+        lastTransitionIndex = (lastTransitionIndex + 1) % transitions.length;
+        currentState = transitions[lastTransitionIndex].to;
+        renderCurrent();
+      }
+
+      function stopLive() {
+        if (timerId !== null) {
+          clearInterval(timerId);
+          timerId = null;
+        }
+        setDebugPanelVisible(false);
+      }
+
+      function startLive() {
+        stopLive();
+        var delay = parseInt(delayInput.value, 10);
+        if (!delay || delay < 100) {
+          delay = 1000;
+          delayInput.value = "1000";
+        }
+        timerId = setInterval(stepSimulation, delay);
+        setDebugPanelVisible(true);
+        updateDebugPanel();
+      }
+
       document.getElementById("rerender").addEventListener("click", function () {
-        var src = document.getElementById("diagram-source").value;
-        var target = document.getElementById("diagram");
-        target.textContent = src;
-        mermaid.run();
+        stopLive();
+        resetSimulation();
       });
+      document.getElementById("start-live").addEventListener("click", startLive);
+      document.getElementById("stop-live").addEventListener("click", stopLive);
+      document.getElementById("step-live").addEventListener("click", stepSimulation);
+
+      resetSimulation();
     });
   </script>
 </head>
@@ -89,7 +474,7 @@
   <div class="wrap">
     <div class="card">
       <h1>Interactive Documentation Demo</h1>
-      <p>This page demonstrates a local Mermaid-style state machine renderer with no external CDN dependencies.</p>
+      <p>This page demonstrates locally hosted Mermaid.js state machine rendering with no external CDN dependencies.</p>
       <div class="actions">
         <a class="btn" href="/">Back to Console</a>
       </div>
@@ -118,6 +503,19 @@ Drive --> Fault: Overcurrent
 Fault --> Idle: Reset</textarea>
       <div class="actions">
         <button id="rerender" type="button">Render Diagram</button>
+      </div>
+      <h2>Live Test</h2>
+      <p>Advance the current state with a time delay and highlight active state + last transition in green.</p>
+      <div class="actions">
+        <label for="tick-delay">Delay (ms)</label>
+        <input id="tick-delay" type="number" min="100" step="100" value="1000">
+        <button id="start-live" type="button">Start Live</button>
+        <button id="stop-live" type="button">Stop</button>
+        <button id="step-live" type="button">Step Once</button>
+      </div>
+      <p id="live-state"></p>
+      <div id="debug-panel" class="debug-panel">Debug
+        <div id="debug-panel-text"></div>
       </div>
     </div>
   </div>
