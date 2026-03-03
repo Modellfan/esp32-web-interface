@@ -345,6 +345,7 @@ void handleRTCSet() {
 
  }
 }
+
 void handleSdCardDeleteAll() {
     if (haveSDCard) {
       File root, file;
@@ -361,6 +362,7 @@ void handleSdCardDeleteAll() {
     server.send(200, "text/json", "{\"result\": \"done\"}");
 
 }
+
 void handleSdCardList() {
 
   if (!haveSDCard) {
@@ -444,8 +446,6 @@ bool uart_readStartsWith(const char *val)
   }
   return retVal;
 }
-
-
 
 static void sendCommand(String cmd)
 {
@@ -740,7 +740,7 @@ void setup(void){
 
   //initialise SD card in SDIO mode
   //if (SD_MMC.begin("/sdcard", true, false, 40000, 5U)) {
-  // if (SD_MMC.begin()) {
+  // if (SD_MMC.begin()) { //Bug if there is no sd card, this will block forever
   //   DBG_OUTPUT_PORT.println("Started SD_MMC");
   //   haveSDCard = true;
   // }

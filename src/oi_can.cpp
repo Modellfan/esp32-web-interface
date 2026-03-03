@@ -77,7 +77,7 @@ static int retries = 0;
 static uint32_t lastStartupRequestMs = 0;
 static int startupRetryCount = 0;
 
-constexpr uint32_t STARTUP_RETRY_INTERVAL_MS = 250;
+constexpr uint32_t STARTUP_RETRY_INTERVAL_MS = 1000;
 constexpr int STARTUP_RETRY_LOG_INTERVAL = 20;
 
 static void requestSdoElement(uint16_t index, uint8_t subIndex) {
