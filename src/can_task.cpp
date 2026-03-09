@@ -30,6 +30,39 @@ QueueHandle_t sdoResponseQueue = nullptr;
 
 #define DBG_OUTPUT_PORT Serial
 
+#ifdef DEBUG
+static constexpr uint32_t CAN_TASK_SLOW_STEP_US = 30000;
+static constexpr uint32_t CAN_TASK_SLOW_LOOP_US = 120000;
+static constexpr uint32_t CAN_TASK_HEARTBEAT_MS = 2000;
+
+static void logSlowCanTaskStep(const char* step, uint32_t elapsedUs) {
+  if (elapsedUs >= CAN_TASK_SLOW_STEP_US) {
+    DBG_OUTPUT_PORT.printf("[WDTDBG][CAN] slow step '%s': %lu us\n", step, (unsigned long)elapsedUs);
+  }
+}
+
+static void logCanTaskHeartbeat() {
+  static uint32_t lastHeartbeatMs = 0;
+  const uint32_t nowMs = millis();
+  if ((nowMs - lastHeartbeatMs) < CAN_TASK_HEARTBEAT_MS) {
+    return;
+  }
+  lastHeartbeatMs = nowMs;
+
+  const UBaseType_t cmdDepth = canCommandQueue ? uxQueueMessagesWaiting(canCommandQueue) : 0;
+  const UBaseType_t evtDepth = canEventQueue ? uxQueueMessagesWaiting(canEventQueue) : 0;
+  const UBaseType_t txDepth = canTxQueue ? uxQueueMessagesWaiting(canTxQueue) : 0;
+  const UBaseType_t sdoDepth = sdoResponseQueue ? uxQueueMessagesWaiting(sdoResponseQueue) : 0;
+
+  DBG_OUTPUT_PORT.printf(
+      "[WDTDBG][CAN] heartbeat ms=%lu core=%d connState=%d scan=%d spot=%d stackHW=%u queues(cmd=%u evt=%u tx=%u sdo=%u)\n",
+      (unsigned long)nowMs, (int)xPortGetCoreID(), (int)DeviceConnection::instance().getState(),
+      DeviceDiscovery::instance().isScanActive() ? 1 : 0, SpotValuesManager::instance().isActive() ? 1 : 0,
+      (unsigned int)uxTaskGetStackHighWaterMark(nullptr), (unsigned int)cmdDepth, (unsigned int)evtDepth,
+      (unsigned int)txDepth, (unsigned int)sdoDepth);
+}
+#endif
+
 // ============================================================================
 // Queue Initialization
 // ============================================================================
@@ -62,6 +95,15 @@ void handleStartScanCommand(const CANCommand& cmd) {
     evt.type = EVT_SCAN_STATUS;
     evt.data.scanStatus.active = true;
     xQueueSend(canEventQueue, &evt, 0);
+
+    // Publish initial scan range immediately so UI can render the active range
+    // before the first periodic scan progress callback arrives.
+    CANEvent progressEvt;
+    progressEvt.type = EVT_SCAN_PROGRESS;
+    progressEvt.data.scanProgress.currentNode = cmd.data.scan.start;
+    progressEvt.data.scanProgress.startNode = cmd.data.scan.start;
+    progressEvt.data.scanProgress.endNode = cmd.data.scan.end;
+    xQueueSend(canEventQueue, &progressEvt, 0);
   } else {
     DBG_OUTPUT_PORT.println("[CAN Task] Scan failed to start - device busy");
     CANEvent evt;
@@ -589,35 +631,79 @@ void canTask(void* parameter) {
   CANCommand cmd;
 
   while (true) {
+#ifdef DEBUG
+    const uint32_t loopStartUs = micros();
+    uint32_t stepStartUs = loopStartUs;
+#endif
+
     // Process commands from queue
     if (xQueueReceive(canCommandQueue, &cmd, 0) == pdTRUE) {
       dispatchCommand(cmd);
     }
+#ifdef DEBUG
+    logSlowCanTaskStep("command", micros() - stepStartUs);
+    stepStartUs = micros();
+#endif
 
     // Process CAN TX queue (frames from SDO protocol layer)
     processTxQueue();
+#ifdef DEBUG
+    logSlowCanTaskStep("tx", micros() - stepStartUs);
+    stepStartUs = micros();
+#endif
 
     // Periodic tasks
     processSpotValuesSequence();
     CanIntervalManager::instance().sendPendingMessages();
     CanIntervalManager::instance().sendCanIoMessage();
+#ifdef DEBUG
+    logSlowCanTaskStep("periodic", micros() - stepStartUs);
+    stepStartUs = micros();
+#endif
 
     // CAN message reception and routing
     receiveAndProcessCanMessages();
+#ifdef DEBUG
+    logSlowCanTaskStep("rx", micros() - stepStartUs);
+    stepStartUs = micros();
+#endif
 
     // Check for pending async write timeouts
     checkPendingWriteTimeouts();
+#ifdef DEBUG
+    logSlowCanTaskStep("pending-write", micros() - stepStartUs);
+    stepStartUs = micros();
+#endif
 
     // Device connection state machine
     DeviceConnection::instance().processConnection();
+#ifdef DEBUG
+    logSlowCanTaskStep("connection", micros() - stepStartUs);
+    stepStartUs = micros();
+#endif
 
     // Device scanning
     DeviceDiscovery::instance().processScan();
+#ifdef DEBUG
+    logSlowCanTaskStep("scan", micros() - stepStartUs);
+    stepStartUs = micros();
+#endif
 
     // Firmware update state handling
     processFirmwareUpdateState();
+#ifdef DEBUG
+    logSlowCanTaskStep("fw-state", micros() - stepStartUs);
+#endif
 
     // Small delay to prevent task starvation
     vTaskDelay(pdMS_TO_TICKS(1));
+
+#ifdef DEBUG
+    const uint32_t totalLoopUs = micros() - loopStartUs;
+    if (totalLoopUs >= CAN_TASK_SLOW_LOOP_US) {
+      DBG_OUTPUT_PORT.printf("[WDTDBG][CAN] slow loop total=%lu us\n", (unsigned long)totalLoopUs);
+    }
+    logCanTaskHeartbeat();
+#endif
   }
 }

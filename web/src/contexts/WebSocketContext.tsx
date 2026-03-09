@@ -92,7 +92,10 @@ export function WebSocketProvider({ children, url }: WebSocketProviderProps) {
             }
           })
         } catch (error) {
-          console.error('Failed to parse WebSocket message:', error)
+          const payload = typeof event.data === 'string'
+            ? event.data.slice(0, 200)
+            : `[non-string payload: ${typeof event.data}]`
+          console.error('Failed to parse WebSocket message:', error, payload)
         }
       }
 

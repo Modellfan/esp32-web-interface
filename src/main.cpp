@@ -1,11 +1,13 @@
 #include "main.h"
-
+#include <Arduino.h>
 #include <ArduinoJson.h>
 #include <ArduinoOTA.h>
 #include <ESPAsyncWebServer.h>
 #include <ESPmDNS.h>
 #include <LittleFS.h>
 #include <WiFi.h>
+#include <ctype.h>
+#include <esp_system.h>
 
 #include "can_task.h"
 #include "config.h"
@@ -39,26 +41,154 @@ AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 Config config;
 
+namespace {
+const char* resetReasonToString(esp_reset_reason_t reason) {
+  switch (reason) {
+    case ESP_RST_UNKNOWN:
+      return "unknown";
+    case ESP_RST_POWERON:
+      return "power_on";
+    case ESP_RST_EXT:
+      return "external_pin";
+    case ESP_RST_SW:
+      return "software";
+    case ESP_RST_PANIC:
+      return "panic";
+    case ESP_RST_INT_WDT:
+      return "interrupt_watchdog";
+    case ESP_RST_TASK_WDT:
+      return "task_watchdog";
+    case ESP_RST_WDT:
+      return "other_watchdog";
+    case ESP_RST_DEEPSLEEP:
+      return "deepsleep";
+    case ESP_RST_BROWNOUT:
+      return "brownout";
+    case ESP_RST_SDIO:
+      return "sdio";
+    case ESP_RST_USB:
+      return "usb";
+    case ESP_RST_JTAG:
+      return "jtag";
+    case ESP_RST_EFUSE:
+      return "efuse";
+    case ESP_RST_PWR_GLITCH:
+      return "power_glitch";
+    case ESP_RST_CPU_LOCKUP:
+      return "cpu_lockup";
+    default:
+      return "unhandled";
+  }
+}
+
+#ifdef DEBUG
+void printRuntimeStatus(const char* sourceTag) {
+  const UBaseType_t cmdDepth = canCommandQueue ? uxQueueMessagesWaiting(canCommandQueue) : 0;
+  const UBaseType_t evtDepth = canEventQueue ? uxQueueMessagesWaiting(canEventQueue) : 0;
+  const UBaseType_t txDepth = canTxQueue ? uxQueueMessagesWaiting(canTxQueue) : 0;
+  const UBaseType_t sdoDepth = sdoResponseQueue ? uxQueueMessagesWaiting(sdoResponseQueue) : 0;
+
+  DBG_OUTPUT_PORT.printf(
+      "[WDTDBG][%s] ms=%lu core=%d connState=%d scan=%d heap=%u minHeap=%u stackHW=%u queues(cmd=%u evt=%u tx=%u sdo=%u)\n",
+      sourceTag, (unsigned long)millis(), (int)xPortGetCoreID(), (int)DeviceConnection::instance().getState(),
+      DeviceDiscovery::instance().isScanActive() ? 1 : 0, (unsigned int)ESP.getFreeHeap(),
+      (unsigned int)ESP.getMinFreeHeap(), (unsigned int)uxTaskGetStackHighWaterMark(nullptr), (unsigned int)cmdDepth,
+      (unsigned int)evtDepth, (unsigned int)txDepth, (unsigned int)sdoDepth);
+}
+
+void handleSerialDebugCommands() {
+  static char lineBuf[40];
+  static size_t lineLen = 0;
+
+  while (DBG_OUTPUT_PORT.available() > 0) {
+    char ch = (char)DBG_OUTPUT_PORT.read();
+
+    if (ch == '\r' || ch == '\n') {
+      if (lineLen == 0) {
+        continue;
+      }
+
+      lineBuf[lineLen] = '\0';
+      for (size_t i = 0; i < lineLen; i++) {
+        lineBuf[i] = (char)tolower((unsigned char)lineBuf[i]);
+      }
+
+      if (strcmp(lineBuf, "status") == 0 || strcmp(lineBuf, "s") == 0) {
+        printRuntimeStatus("serial");
+      } else if (strcmp(lineBuf, "help") == 0 || strcmp(lineBuf, "h") == 0 || strcmp(lineBuf, "?") == 0) {
+        DBG_OUTPUT_PORT.println("[WDTDBG] serial commands: status|s, help|h|?");
+      } else {
+        DBG_OUTPUT_PORT.printf("[WDTDBG] unknown serial command '%s' (try 'help')\n", lineBuf);
+      }
+
+      lineLen = 0;
+      continue;
+    }
+
+    if (lineLen < (sizeof(lineBuf) - 1)) {
+      lineBuf[lineLen++] = ch;
+    } else {
+      lineLen = 0;
+      DBG_OUTPUT_PORT.println("[WDTDBG] serial command too long, input cleared");
+    }
+  }
+}
+#endif
+}  // namespace
+
 // ============================================================================
 // Setup
 // ============================================================================
 
 void setup(void) {
   DBG_OUTPUT_PORT.begin(115200);
+  delay(50);
+  const esp_reset_reason_t resetReason = esp_reset_reason();
+  DBG_OUTPUT_PORT.printf("[BOOT] Reset reason: %s (%d)\n", resetReasonToString(resetReason), (int)resetReason);
+
+#ifdef DEBUG
+  DBG_OUTPUT_PORT.println("[WDTDBG][setup] start");
+  DBG_OUTPUT_PORT.printf("[WDTDBG][setup] STATUS_LED_PIN=%d STATUS_LED_COUNT=%d\n", STATUS_LED_PIN, STATUS_LED_COUNT);
+#endif
 
   // Initialize status LED (NeoPixel)
+#ifdef DEBUG
+  DBG_OUTPUT_PORT.println("[WDTDBG][setup] status led begin");
+#endif
   StatusLED::instance().begin();
   statusLEDOff();
+#ifdef DEBUG
+  DBG_OUTPUT_PORT.println("[WDTDBG][setup] status led done");
+#endif
 
   // Start SPI Flash file system
+#ifdef DEBUG
+  DBG_OUTPUT_PORT.println("[WDTDBG][setup] LittleFS begin");
+#endif
   LittleFS.begin(false, "/littlefs", 10, "littlefs");
+#ifdef DEBUG
+  DBG_OUTPUT_PORT.println("[WDTDBG][setup] LittleFS done");
+#endif
 
   // WiFi initialization
+#ifdef DEBUG
+  DBG_OUTPUT_PORT.println("[WDTDBG][setup] WiFi init");
+#endif
   WiFiSetup::initialize();
+#ifdef DEBUG
+  DBG_OUTPUT_PORT.println("[WDTDBG][setup] WiFi init done");
+#endif
 
   MDNS.begin(host);
+#ifdef DEBUG
+  DBG_OUTPUT_PORT.println("[WDTDBG][setup] mDNS begin done");
+#endif
 
   config.load();
+#ifdef DEBUG
+  DBG_OUTPUT_PORT.printf("[WDTDBG][setup] config loaded canTx=%d canRx=%d baud=%d\n", config.getCanTXPin(),
+                         config.getCanRXPin(), config.getCanSpeed());
+#endif
 
   // Initialize CAN enable pin if configured
   if (config.getCanEnablePin() > 0) {
@@ -149,6 +279,10 @@ void setup(void) {
   server.begin();
 
   MDNS.addService("http", "tcp", 80);
+
+#ifdef DEBUG
+  DBG_OUTPUT_PORT.println("[WDTDBG][setup] complete");
+#endif
 }
 
 // ============================================================================
@@ -156,10 +290,48 @@ void setup(void) {
 // ============================================================================
 
 void loop(void) {
+#ifdef DEBUG
+  handleSerialDebugCommands();
+  const uint32_t loopStartUs = micros();
+  uint32_t opStartUs = micros();
+#endif
+
   ws.cleanupClients();
+#ifdef DEBUG
+  const uint32_t wsCleanupUs = micros() - opStartUs;
+  opStartUs = micros();
+#endif
+
   ArduinoOTA.handle();
+#ifdef DEBUG
+  const uint32_t otaHandleUs = micros() - opStartUs;
+  opStartUs = micros();
+#endif
 
   // Process events from CAN task and firmware progress
   EventProcessor::processEvents(ws);
+#ifdef DEBUG
+  const uint32_t eventProcessUs = micros() - opStartUs;
+  opStartUs = micros();
+#endif
+
   EventProcessor::processFirmwareProgress(ws);
+#ifdef DEBUG
+  const uint32_t fwProcessUs = micros() - opStartUs;
+  const uint32_t loopElapsedUs = micros() - loopStartUs;
+
+  if (wsCleanupUs > 20000 || otaHandleUs > 20000 || eventProcessUs > 40000 || fwProcessUs > 20000 ||
+      loopElapsedUs > 100000) {
+    DBG_OUTPUT_PORT.printf("[WDTDBG][loop] slow us total=%lu ws=%lu ota=%lu events=%lu fw=%lu\n",
+                           (unsigned long)loopElapsedUs, (unsigned long)wsCleanupUs, (unsigned long)otaHandleUs,
+                           (unsigned long)eventProcessUs, (unsigned long)fwProcessUs);
+  }
+
+  static uint32_t lastHeartbeatMs = 0;
+  const uint32_t nowMs = millis();
+  if ((nowMs - lastHeartbeatMs) >= 2000) {
+    printRuntimeStatus("loop");
+    lastHeartbeatMs = nowMs;
+  }
+#endif
 }

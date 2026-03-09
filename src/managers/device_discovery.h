@@ -58,6 +58,9 @@ public:
   bool startContinuousScan(uint8_t startNode = 1, uint8_t endNode = 32);
   void stopContinuousScan();
   bool isScanActive() const;
+  uint8_t getScanStartNode() const;
+  uint8_t getScanEndNode() const;
+  uint8_t getCurrentScanNode() const;
   void processScan();  // Called from main loop
 
   // Callbacks

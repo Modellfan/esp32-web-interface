@@ -18,6 +18,7 @@ export default function SystemOverview() {
   const [namingDevice, setNamingDevice] = useState<MergedDevice | null>(null)
   const [renamingDevice, setRenamingDevice] = useState<MergedDevice | null>(null)
   const [configuredScanRange, setConfiguredScanRange] = useState({ start: 1, end: 32 })
+  const [scanRangeLoaded, setScanRangeLoaded] = useState(false)
 
   // Use shared WebSocket connection
   const { isConnected, isConnecting, isRetrying } = useWebSocketContext()
@@ -40,11 +41,11 @@ export default function SystemOverview() {
 
   // Auto-start scanning when page loads and WebSocket is connected
   useEffect(() => {
-    if (isConnected && !scanning && configuredScanRange) {
+    if (isConnected && scanRangeLoaded && !scanning && configuredScanRange) {
       console.log('[SystemOverview] Auto-starting scan on mount')
       startScan(configuredScanRange.start, configuredScanRange.end)
     }
-  }, [isConnected, configuredScanRange.start, configuredScanRange.end])
+  }, [isConnected, scanRangeLoaded, configuredScanRange.start, configuredScanRange.end])
 
   // Stop scanning when component unmounts (navigating away)
   useEffect(() => {
@@ -68,10 +69,14 @@ export default function SystemOverview() {
       } catch (error) {
         console.error('Failed to load scan range settings:', error)
         // Keep defaults if loading fails
+      } finally {
+        setScanRangeLoaded(true)
       }
     }
     loadScanRange()
   }, [])
+
+  const displayScanRange = activeScanRange ?? configuredScanRange
 
   // Reconnect handler (WebSocket auto-reconnects, this just reloads the page)
   const handleReconnect = () => {
@@ -158,7 +163,7 @@ export default function SystemOverview() {
         <DeviceScanner
           scanning={scanning}
           currentScanNode={currentScanNode}
-          {...(activeScanRange && { scanRange: activeScanRange })}
+          scanRange={displayScanRange}
         />
 
         {mergedDevices.length === 0 ? (
@@ -170,7 +175,9 @@ export default function SystemOverview() {
               <>
                 <LoadingSpinner size="large" />
                 <p class="empty-state-text">{content.scanningForDevices}</p>
-                <p class="empty-state-hint">{content.searchingNodes}</p>
+                <p class="empty-state-hint">
+                  {content.searchingNodes({ start: displayScanRange.start, end: displayScanRange.end })}
+                </p>
               </>
             ) : (
               <>

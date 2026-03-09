@@ -27,7 +27,6 @@
 #include <vector>
 
 #include <FS.h>
-#include <StreamUtils.h>
 
 #include "driver/gpio.h"
 #include "driver/twai.h"
@@ -170,8 +169,7 @@ bool SendJson(WiFiClient client) {
     return false;  // No cached JSON
 
   if (failed < 5) {
-    WriteBufferingStream bufferedWifiClient{client, 1000};
-    serializeJson(doc, bufferedWifiClient);
+    serializeJson(doc, client);
   }
   return failed < 5;
 }
@@ -298,8 +296,7 @@ void SendCanMapping(WiFiClient client) {
   JsonDocument doc;
 
   if (retrieveCanMappingsAsJson(doc)) {
-    WriteBufferingStream bufferedWifiClient{client, 1000};
-    serializeJson(doc, bufferedWifiClient);
+    serializeJson(doc, client);
   }
 }
 
@@ -508,7 +505,7 @@ bool StopDevice() {
 // Helper: Build error description map from parameter JSON
 static std::map<int, String> buildErrorDescriptionMap() {
   std::map<int, String> errorDescriptions;
-  if (!conn.getCachedJson().isNull() && conn.getCachedJson().containsKey("lasterr")) {
+  if (!conn.getCachedJson().isNull() && !conn.getCachedJson()["lasterr"].isNull()) {
     JsonObject lasterr = conn.getCachedJson()["lasterr"].as<JsonObject>();
     for (JsonPair kv : lasterr) {
       int errorNum = atoi(kv.key().c_str());
@@ -522,9 +519,9 @@ static std::map<int, String> buildErrorDescriptionMap() {
 // Helper: Determine tick duration from uptime parameter's unit
 static int determineTickDuration() {
   int tickDurationMs = 10;  // Default to 10ms
-  if (!conn.getCachedJson().isNull() && conn.getCachedJson().containsKey("uptime")) {
+  if (!conn.getCachedJson().isNull() && !conn.getCachedJson()["uptime"].isNull()) {
     JsonObject uptime = conn.getCachedJson()["uptime"].as<JsonObject>();
-    if (uptime.containsKey("unit")) {
+    if (!uptime["unit"].isNull()) {
       String unit = uptime["unit"].as<String>();
       if (unit == "sec" || unit == "s") {
         tickDurationMs = 1000;  // 1 second

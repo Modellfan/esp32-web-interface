@@ -40,8 +40,8 @@ bool DeviceStorage::saveDevices(const JsonDocument& doc) {
 
 // Update or add a device in the devices JSON object
 void DeviceStorage::updateDeviceInJson(JsonObject& savedDevices, const char* serial, uint8_t nodeId) {
-  if (!savedDevices.containsKey(serial)) {
-    savedDevices.createNestedObject(serial);
+  if (savedDevices[serial].isNull()) {
+    savedDevices[serial].to<JsonObject>();
   }
   JsonObject savedDevice = savedDevices[serial].as<JsonObject>();
   savedDevice["nodeId"] = nodeId;

@@ -15,12 +15,19 @@ StatusLED::StatusLED(uint8_t pin, uint8_t count) : led(count, pin, NEO_GRB + NEO
 
 // Initialize the LED
 void StatusLED::begin() {
+#if STATUS_LED_COUNT == 0
+  return;
+#endif
   led.begin();
   off();
 }
 
 // Set LED to a specific color
 void StatusLED::setColor(uint32_t color) {
+#if STATUS_LED_COUNT == 0
+  (void)color;
+  return;
+#endif
   led.setPixelColor(0, color);
   led.show();
 }

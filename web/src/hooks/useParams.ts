@@ -3,6 +3,17 @@ import { ParamStorage, ParameterList, getParameterDisplayName } from '../utils/p
 import { useWebSocketContext } from '../contexts/WebSocketContext'
 import { useDeviceDetailsContext } from '../contexts/DeviceDetailsContext'
 
+function toNodeId(value: unknown): number | null {
+  const n = Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
+function nodeIdsMatch(a: unknown, b: unknown): boolean {
+  const aNum = toNodeId(a)
+  const bNum = toNodeId(b)
+  return aNum !== null && bNum !== null && aNum === bNum
+}
+
 /**
  * Parses enum definitions from unit strings
  * Format: "0=Rev1, 1=Rev2, 2=Rev3"
@@ -110,6 +121,9 @@ export function useParams(deviceSerial: string | undefined, nodeId: number | und
       }, 60000) // 60 second timeout (downloads can take a while for large param sets)
 
       // Store the pending request with timeout reference
+      if (pendingValuesRequestRef.current?.timeoutId) {
+        clearTimeout(pendingValuesRequestRef.current.timeoutId)
+      }
       pendingValuesRequestRef.current = { nodeId, resolve, reject, timeoutId }
 
       // Use optimized endpoint if we have schema cached
@@ -206,11 +220,15 @@ export function useParams(deviceSerial: string | undefined, nodeId: number | und
 
       // Handle values pending response (download in progress)
       else if (message.event === 'paramValuesPending') {
-        const nodeId = message.data.nodeId
+        const nodeId = toNodeId(message.data?.nodeId)
+        if (nodeId === null) {
+          console.warn('[useParams] paramValuesPending without valid nodeId:', message)
+          return
+        }
         console.log('Param values download pending for nodeId:', nodeId, message.data.message)
 
         // Reset timeout when we receive pending - download is in progress
-        if (pendingValuesRequestRef.current && pendingValuesRequestRef.current.nodeId === nodeId) {
+        if (pendingValuesRequestRef.current && nodeIdsMatch(pendingValuesRequestRef.current.nodeId, nodeId)) {
           // Clear existing timeout and set a new one
           if (pendingValuesRequestRef.current.timeoutId) {
             clearTimeout(pendingValuesRequestRef.current.timeoutId)
@@ -226,18 +244,28 @@ export function useParams(deviceSerial: string | undefined, nodeId: number | und
 
       // Handle values data response
       else if (message.event === 'paramValuesData') {
-        const nodeId = message.data.nodeId
-        const rawParams = message.data.rawParams as ParameterList
+        const data = message.data || {}
+        const nodeId = toNodeId(data.nodeId)
+        const rawParams = (data.rawParams ?? data) as ParameterList
 
         console.log('[useParams] Received paramValuesData event:', {
           nodeId,
           hasPendingRequest: !!pendingValuesRequestRef.current,
           pendingNodeId: pendingValuesRequestRef.current?.nodeId,
-          rawParamsKeys: rawParams ? Object.keys(rawParams).length : 0
+          rawParamsKeys: rawParams && typeof rawParams === 'object' ? Object.keys(rawParams).length : 0
         })
 
+        if (nodeId === null) {
+          console.warn('[useParams] paramValuesData without valid nodeId:', message)
+          return
+        }
+        if (!rawParams || typeof rawParams !== 'object' || Array.isArray(rawParams)) {
+          console.warn('[useParams] paramValuesData without valid rawParams payload:', message)
+          return
+        }
+
         // Check if this response is for a pending request
-        if (pendingValuesRequestRef.current && pendingValuesRequestRef.current.nodeId === nodeId) {
+        if (pendingValuesRequestRef.current && nodeIdsMatch(pendingValuesRequestRef.current.nodeId, nodeId)) {
           console.log('[useParams] Received param values via WebSocket for nodeId:', nodeId, 'with', Object.keys(rawParams).length, 'params')
 
           // Clear timeout
@@ -253,8 +281,12 @@ export function useParams(deviceSerial: string | undefined, nodeId: number | und
 
       // Handle values-only data response (optimized, no schema)
       else if (message.event === 'paramValuesOnly') {
-        const nodeId = message.data.nodeId
+        const nodeId = toNodeId(message.data?.nodeId)
         const values = message.data.values as Record<string, number>
+        if (nodeId === null) {
+          console.warn('[useParams] paramValuesOnly without valid nodeId:', message)
+          return
+        }
 
         console.log('[useParams] Received paramValuesOnly event:', {
           nodeId,
@@ -264,7 +296,7 @@ export function useParams(deviceSerial: string | undefined, nodeId: number | und
         })
 
         // Check if this response is for a pending request
-        if (pendingValuesRequestRef.current && pendingValuesRequestRef.current.nodeId === nodeId) {
+        if (pendingValuesRequestRef.current && nodeIdsMatch(pendingValuesRequestRef.current.nodeId, nodeId)) {
           console.log('[useParams] Received values-only via WebSocket for nodeId:', nodeId, 'with', Object.keys(values).length, 'values')
 
           // Clear timeout
@@ -287,11 +319,15 @@ export function useParams(deviceSerial: string | undefined, nodeId: number | und
 
       // Handle values error response
       else if (message.event === 'paramValuesError') {
-        const nodeId = message.data.nodeId
+        const nodeId = toNodeId(message.data?.nodeId)
         const error = message.data.error
+        if (nodeId === null) {
+          console.warn('[useParams] paramValuesError without valid nodeId:', message)
+          return
+        }
 
         // Check if this error is for a pending request
-        if (pendingValuesRequestRef.current && pendingValuesRequestRef.current.nodeId === nodeId) {
+        if (pendingValuesRequestRef.current && nodeIdsMatch(pendingValuesRequestRef.current.nodeId, nodeId)) {
           console.error('Values error via WebSocket:', error)
 
           // Clear timeout

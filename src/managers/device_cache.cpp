@@ -35,28 +35,28 @@ JsonDocument& DeviceCache::getDevices() {
 bool DeviceCache::hasDevice(const char* serial) {
   ensureLoaded();
 
-  if (!cachedDevices_.containsKey("devices")) {
+  if (cachedDevices_["devices"].isNull()) {
     return false;
   }
 
   JsonObject devices = cachedDevices_["devices"].as<JsonObject>();
-  return devices.containsKey(serial);
+  return !devices[serial].isNull();
 }
 
 std::string DeviceCache::getDeviceName(const char* serial) {
   ensureLoaded();
 
-  if (!cachedDevices_.containsKey("devices")) {
+  if (cachedDevices_["devices"].isNull()) {
     return "";
   }
 
   JsonObject devices = cachedDevices_["devices"].as<JsonObject>();
-  if (!devices.containsKey(serial)) {
+  if (devices[serial].isNull()) {
     return "";
   }
 
   JsonObject device = devices[serial].as<JsonObject>();
-  if (!device.containsKey("name")) {
+  if (device["name"].isNull()) {
     return "";
   }
 

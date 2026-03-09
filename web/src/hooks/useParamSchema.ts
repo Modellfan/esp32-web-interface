@@ -2,6 +2,17 @@ import { useState, useEffect, useRef } from 'preact/hooks'
 import { ParamStorage, ParameterList, getParameterDisplayName } from '../utils/paramStorage'
 import { useWebSocketContext } from '../contexts/WebSocketContext'
 
+function toNodeId(value: unknown): number | null {
+  const n = Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
+function nodeIdsMatch(a: unknown, b: unknown): boolean {
+  const aNum = toNodeId(a)
+  const bNum = toNodeId(b)
+  return aNum !== null && bNum !== null && aNum === bNum
+}
+
 /**
  * Parses enum definitions from unit strings
  * Format: "0=Rev1, 1=Rev2, 2=Rev3"
@@ -87,11 +98,15 @@ export function useParamSchema(
     const unsubscribe = subscribe((message) => {
       // Handle schema data from ESP32 cache (getParamSchema response)
       if (message.event === 'paramSchemaData') {
-        const msgNodeId = message.data.nodeId
+        const msgNodeId = toNodeId(message.data?.nodeId)
+        if (msgNodeId === null) {
+          console.warn('[useParamSchema] paramSchemaData without valid nodeId:', message)
+          return
+        }
         const rawSchema = message.data.schema as ParameterList
 
         if (requestStateRef.current.phase === 'checking-esp32' &&
-            requestStateRef.current.nodeId === msgNodeId) {
+            nodeIdsMatch(requestStateRef.current.nodeId, msgNodeId)) {
           console.log('[useParamSchema] Received schema from ESP32 cache for nodeId:', msgNodeId)
 
           // Clear timeout
@@ -113,10 +128,14 @@ export function useParamSchema(
 
       // Handle schema error - ESP32 doesn't have it cached
       else if (message.event === 'paramSchemaError') {
-        const msgNodeId = message.data.nodeId
+        const msgNodeId = toNodeId(message.data?.nodeId)
+        if (msgNodeId === null) {
+          console.warn('[useParamSchema] paramSchemaError without valid nodeId:', message)
+          return
+        }
 
         if (requestStateRef.current.phase === 'checking-esp32' &&
-            requestStateRef.current.nodeId === msgNodeId) {
+            nodeIdsMatch(requestStateRef.current.nodeId, msgNodeId)) {
           console.log('[useParamSchema] ESP32 cache empty, triggering background download')
 
           // Clear timeout
@@ -141,11 +160,20 @@ export function useParamSchema(
 
       // Handle param values data (from background download)
       else if (message.event === 'paramValuesData') {
-        const msgNodeId = message.data.nodeId
-        const rawParams = message.data.rawParams as ParameterList
+        const data = message.data || {}
+        const msgNodeId = toNodeId(data.nodeId)
+        const rawParams = (data.rawParams ?? data) as ParameterList
+        if (msgNodeId === null) {
+          console.warn('[useParamSchema] paramValuesData without valid nodeId:', message)
+          return
+        }
+        if (!rawParams || typeof rawParams !== 'object' || Array.isArray(rawParams)) {
+          console.warn('[useParamSchema] paramValuesData without valid rawParams payload:', message)
+          return
+        }
 
         if (requestStateRef.current.phase === 'downloading' &&
-            requestStateRef.current.nodeId === msgNodeId) {
+            nodeIdsMatch(requestStateRef.current.nodeId, msgNodeId)) {
           console.log('[useParamSchema] Received param data from download for nodeId:', msgNodeId)
 
           // Clear timeout
@@ -167,10 +195,14 @@ export function useParamSchema(
 
       // Handle download pending (download in progress)
       else if (message.event === 'paramValuesPending') {
-        const msgNodeId = message.data.nodeId
+        const msgNodeId = toNodeId(message.data?.nodeId)
+        if (msgNodeId === null) {
+          console.warn('[useParamSchema] paramValuesPending without valid nodeId:', message)
+          return
+        }
 
         if (requestStateRef.current.phase === 'downloading' &&
-            requestStateRef.current.nodeId === msgNodeId) {
+            nodeIdsMatch(requestStateRef.current.nodeId, msgNodeId)) {
           console.log('[useParamSchema] Download in progress:', message.data.message)
 
           // Reset timeout since download is progressing
@@ -187,10 +219,14 @@ export function useParamSchema(
 
       // Handle download error
       else if (message.event === 'paramValuesError') {
-        const msgNodeId = message.data.nodeId
+        const msgNodeId = toNodeId(message.data?.nodeId)
+        if (msgNodeId === null) {
+          console.warn('[useParamSchema] paramValuesError without valid nodeId:', message)
+          return
+        }
 
         if (requestStateRef.current.phase === 'downloading' &&
-            requestStateRef.current.nodeId === msgNodeId) {
+            nodeIdsMatch(requestStateRef.current.nodeId, msgNodeId)) {
           console.error('[useParamSchema] Download failed:', message.data.error)
 
           if (requestStateRef.current.timeoutId) {

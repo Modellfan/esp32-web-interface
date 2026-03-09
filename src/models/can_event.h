@@ -58,7 +58,7 @@ struct SpotValuesStatusEvent {
 
 struct SpotValuesEvent {
   uint32_t timestamp;
-  char valuesJson[1024];  // JSON string of values
+  char valuesJson[2048];  // JSON string of values
 };
 
 struct DeviceNameSetEvent {

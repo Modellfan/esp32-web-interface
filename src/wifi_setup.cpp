@@ -6,6 +6,38 @@
 
 #define DBG_OUTPUT_PORT Serial
 
+#ifndef AP_NAME_PREFIX
+#define AP_NAME_PREFIX "ESP"
+#endif
+
+#ifndef AP_NAME_USE_MAC_SUFFIX
+#define AP_NAME_USE_MAC_SUFFIX 1
+#endif
+
+static String buildAccessPointName() {
+  String apSSID = AP_NAME_PREFIX;
+  apSSID.trim();
+
+  if (apSSID.length() == 0) {
+    apSSID = "ESP";
+  }
+
+#if AP_NAME_USE_MAC_SUFFIX
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+
+  if (!apSSID.endsWith("-")) {
+    apSSID += "-";
+  }
+
+  apSSID += String(mac[4], HEX);
+  apSSID += String(mac[5], HEX);
+  apSSID.toUpperCase();
+#endif
+
+  return apSSID;
+}
+
 bool WiFiSetup::loadCredentials(Credentials& creds) {
   if (!LittleFS.exists("/wifi.txt")) {
     DBG_OUTPUT_PORT.println("wifi.txt not found in LittleFS");
@@ -77,11 +109,7 @@ bool WiFiSetup::connectStation(const Credentials& creds, int maxAttempts) {
 void WiFiSetup::startAccessPoint() {
   DBG_OUTPUT_PORT.println("Starting in AP mode");
 
-  // Generate AP name using MAC address
-  uint8_t mac[6];
-  WiFi.macAddress(mac);
-  String apSSID = "ESP-" + String(mac[4], HEX) + String(mac[5], HEX);
-  apSSID.toUpperCase();
+  String apSSID = buildAccessPointName();
 
   WiFi.mode(WIFI_AP);
   WiFi.softAP(apSSID.c_str());

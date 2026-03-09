@@ -13,6 +13,7 @@
 #include "managers/device_connection.h"
 #include "managers/spot_values_manager.h"
 #include "models/can_event.h"
+#include "utils/websocket_helpers.h"
 
 #define DBG_OUTPUT_PORT Serial
 
@@ -225,7 +226,7 @@ static void handleJsonReadyEvent(AsyncWebSocket& ws, const CANEvent& evt) {
     if (!error) {
       for (const auto& pair : latestSpotValues) {
         String paramId = String(pair.first);
-        if (paramsDoc.containsKey(paramId)) {
+        if (!paramsDoc[paramId].isNull()) {
           paramsDoc[paramId]["value"] = pair.second;
         }
       }
@@ -234,15 +235,18 @@ static void handleJsonReadyEvent(AsyncWebSocket& ws, const CANEvent& evt) {
     }
   }
 
-  // Build response
-  String output = "{\"event\":\"paramValuesData\",\"data\":{\"nodeId\":";
-  output += evt.data.jsonReady.nodeId;
-  output += ",\"rawParams\":";
-  output += json;
-  output += "}}";
-
-  client->text(output);
-  DBG_OUTPUT_PORT.printf("[EventProcessor] Sent param values (%d bytes)\n", output.length());
+  if (sendParamValuesData(ws, client, evt.data.jsonReady.nodeId, json)) {
+    DBG_OUTPUT_PORT.printf("[EventProcessor] Sent param values (%d bytes)\n", json.length());
+  } else {
+    JsonDocument errorDoc;
+    errorDoc["event"] = "paramValuesError";
+    errorDoc["data"]["error"] = "Insufficient memory to send param values";
+    errorDoc["data"]["nodeId"] = evt.data.jsonReady.nodeId;
+    String errorOutput;
+    serializeJson(errorDoc, errorOutput);
+    client->text(errorOutput);
+    DBG_OUTPUT_PORT.println("[EventProcessor] Failed to send param values (memory/queue)");
+  }
 }
 
 void processEvents(AsyncWebSocket& ws) {

@@ -150,8 +150,8 @@ String DeviceDiscovery::scanDevices(uint8_t startNode, uint8_t endNode, uint8_t&
   DeviceStorage::loadDevices(savedDoc);
 
   // Ensure devices object exists in saved doc
-  if (!savedDoc.containsKey("devices")) {
-    savedDoc.createNestedObject("devices");
+  if (savedDoc["devices"].isNull()) {
+    savedDoc["devices"].to<JsonObject>();
   }
 
   JsonObject savedDevices = savedDoc["devices"].as<JsonObject>();
@@ -240,6 +240,18 @@ void DeviceDiscovery::stopContinuousScan() {
 // Check if scan is active
 bool DeviceDiscovery::isScanActive() const {
   return scanActive;
+}
+
+uint8_t DeviceDiscovery::getScanStartNode() const {
+  return scanStart;
+}
+
+uint8_t DeviceDiscovery::getScanEndNode() const {
+  return scanEnd;
+}
+
+uint8_t DeviceDiscovery::getCurrentScanNode() const {
+  return currentNode;
 }
 
 // Process continuous scan (called from main loop) - non-blocking state machine
@@ -345,7 +357,7 @@ void DeviceDiscovery::loadDevices() {
     return;
   }
 
-  if (!doc.containsKey("devices")) {
+  if (doc["devices"].isNull()) {
     DBG_OUTPUT_PORT.println("No 'devices' key in devices.json");
     return;
   }
@@ -477,15 +489,15 @@ bool DeviceDiscovery::saveDeviceName(String serial, String name, int nodeId) {
   DeviceStorage::loadDevices(doc);
 
   // Ensure devices object exists
-  if (!doc.containsKey("devices")) {
-    doc.createNestedObject("devices");
+  if (doc["devices"].isNull()) {
+    doc["devices"].to<JsonObject>();
   }
 
   JsonObject devicesObj = doc["devices"].as<JsonObject>();
 
   // Get or create device object (serial is the key)
-  if (!devicesObj.containsKey(serial)) {
-    devicesObj.createNestedObject(serial);
+  if (devicesObj[serial].isNull()) {
+    devicesObj[serial].to<JsonObject>();
   }
 
   JsonObject device = devicesObj[serial].as<JsonObject>();
@@ -518,7 +530,7 @@ bool DeviceDiscovery::deleteDevice(String serial) {
   DeviceStorage::loadDevices(doc);
 
   // Check if devices object exists
-  if (!doc.containsKey("devices")) {
+  if (doc["devices"].isNull()) {
     DBG_OUTPUT_PORT.println("No devices to delete");
     return false;
   }
@@ -526,7 +538,7 @@ bool DeviceDiscovery::deleteDevice(String serial) {
   JsonObject devicesObj = doc["devices"].as<JsonObject>();
 
   // Check if device exists
-  if (!devicesObj.containsKey(serial)) {
+  if (devicesObj[serial].isNull()) {
     DBG_OUTPUT_PORT.printf("Device %s not found\n", serial.c_str());
     return false;
   }

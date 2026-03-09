@@ -9,7 +9,7 @@ interface DeviceScannerProps {
 export default function DeviceScanner({
   scanning,
   currentScanNode,
-  scanRange = { start: 0, end: 255 }
+  scanRange = { start: 1, end: 32 }
 }: DeviceScannerProps) {
   const content = useIntlayer('device-scanner')
 

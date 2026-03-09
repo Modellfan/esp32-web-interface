@@ -221,6 +221,9 @@ export function DeviceProvider({ children }: DeviceProviderProps) {
       console.warn('[DeviceContext] Cannot scan: WebSocket not connected')
       return
     }
+    setScanRange({ start, end })
+    setCurrentScanNode(start)
+    setPreviousScanNode(null)
     sendMessage('startScan', { start, end })
   }, [isConnected, sendMessage])
 

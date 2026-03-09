@@ -3,7 +3,7 @@
 #include <cstdint>
 
 // Configuration constants
-#define MAX_PARAM_IDS 100
+#define MAX_PARAM_IDS 200
 #define SPOT_VALUES_INTERVAL_MIN_MS 100
 #define SPOT_VALUES_INTERVAL_MAX_MS 10000
 #define CAN_INTERVAL_MIN_MS 10

@@ -225,13 +225,13 @@ void handleSendCanMessage(AsyncWebSocketClient* client, JsonDocument& doc) {
   CANCommand cmd;
   cmd.type = CMD_SEND_CAN_MESSAGE;
 
-  if (!doc.containsKey("canId")) {
+  if (doc["canId"].isNull()) {
     DBG_OUTPUT_PORT.println("[WebSocket] ERROR: sendCanMessage missing canId");
     return;
   }
   cmd.data.sendCanMessage.canId = doc["canId"].as<uint32_t>();
 
-  if (!doc.containsKey("data")) {
+  if (doc["data"].isNull()) {
     DBG_OUTPUT_PORT.println("[WebSocket] ERROR: sendCanMessage missing data");
     return;
   }
@@ -251,20 +251,20 @@ void handleStartCanInterval(AsyncWebSocketClient* client, JsonDocument& doc) {
   CANCommand cmd;
   cmd.type = CMD_START_CAN_INTERVAL;
 
-  if (!doc.containsKey("intervalId")) {
+  if (doc["intervalId"].isNull()) {
     DBG_OUTPUT_PORT.println("[WebSocket] ERROR: startCanInterval missing intervalId");
     return;
   }
   String intervalId = doc["intervalId"].as<String>();
   safeCopyString(cmd.data.startCanInterval.intervalId, intervalId);
 
-  if (!doc.containsKey("canId")) {
+  if (doc["canId"].isNull()) {
     DBG_OUTPUT_PORT.println("[WebSocket] ERROR: startCanInterval missing canId");
     return;
   }
   cmd.data.startCanInterval.canId = doc["canId"].as<uint32_t>();
 
-  if (!doc.containsKey("data")) {
+  if (doc["data"].isNull()) {
     DBG_OUTPUT_PORT.println("[WebSocket] ERROR: startCanInterval missing data");
     return;
   }
@@ -277,7 +277,7 @@ void handleStartCanInterval(AsyncWebSocketClient* client, JsonDocument& doc) {
     }
   }
 
-  if (!doc.containsKey("interval")) {
+  if (doc["interval"].isNull()) {
     DBG_OUTPUT_PORT.println("[WebSocket] ERROR: startCanInterval missing interval");
     return;
   }
@@ -294,7 +294,7 @@ void handleStopCanInterval(AsyncWebSocketClient* client, JsonDocument& doc) {
   CANCommand cmd;
   cmd.type = CMD_STOP_CAN_INTERVAL;
 
-  if (!doc.containsKey("intervalId")) {
+  if (doc["intervalId"].isNull()) {
     DBG_OUTPUT_PORT.println("[WebSocket] ERROR: stopCanInterval missing intervalId");
     return;
   }
@@ -308,20 +308,22 @@ void handleStartCanIoInterval(AsyncWebSocketClient* client, JsonDocument& doc) {
   CANCommand cmd;
   cmd.type = CMD_START_CANIO_INTERVAL;
 
-  cmd.data.startCanIoInterval.canId = doc.containsKey("canId") ? doc["canId"].as<uint32_t>() : 0x3F;
-  cmd.data.startCanIoInterval.pot = doc.containsKey("pot") ? doc["pot"].as<uint16_t>() : 0;
-  cmd.data.startCanIoInterval.pot2 = doc.containsKey("pot2") ? doc["pot2"].as<uint16_t>() : 0;
-  cmd.data.startCanIoInterval.canio = doc.containsKey("canio") ? doc["canio"].as<uint8_t>() : 0;
-  cmd.data.startCanIoInterval.cruisespeed = doc.containsKey("cruisespeed") ? doc["cruisespeed"].as<uint16_t>() : 0;
-  cmd.data.startCanIoInterval.regenpreset = doc.containsKey("regenpreset") ? doc["regenpreset"].as<uint8_t>() : 0;
+  cmd.data.startCanIoInterval.canId = doc["canId"].isNull() ? 0x3F : doc["canId"].as<uint32_t>();
+  cmd.data.startCanIoInterval.pot = doc["pot"].isNull() ? 0 : doc["pot"].as<uint16_t>();
+  cmd.data.startCanIoInterval.pot2 = doc["pot2"].isNull() ? 0 : doc["pot2"].as<uint16_t>();
+  cmd.data.startCanIoInterval.canio = doc["canio"].isNull() ? 0 : doc["canio"].as<uint8_t>();
+  cmd.data.startCanIoInterval.cruisespeed =
+      doc["cruisespeed"].isNull() ? 0 : doc["cruisespeed"].as<uint16_t>();
+  cmd.data.startCanIoInterval.regenpreset =
+      doc["regenpreset"].isNull() ? 0 : doc["regenpreset"].as<uint8_t>();
 
-  cmd.data.startCanIoInterval.intervalMs = doc.containsKey("interval") ? doc["interval"].as<uint32_t>() : 100;
+  cmd.data.startCanIoInterval.intervalMs = doc["interval"].isNull() ? 100 : doc["interval"].as<uint32_t>();
   if (cmd.data.startCanIoInterval.intervalMs < CAN_IO_INTERVAL_MIN_MS)
     cmd.data.startCanIoInterval.intervalMs = CAN_IO_INTERVAL_MIN_MS;
   if (cmd.data.startCanIoInterval.intervalMs > CAN_IO_INTERVAL_MAX_MS)
     cmd.data.startCanIoInterval.intervalMs = CAN_IO_INTERVAL_MAX_MS;
 
-  cmd.data.startCanIoInterval.useCrc = doc.containsKey("useCrc") ? doc["useCrc"].as<bool>() : false;
+  cmd.data.startCanIoInterval.useCrc = doc["useCrc"].isNull() ? false : doc["useCrc"].as<bool>();
 
   queueCanCommand(cmd, "Start CAN IO interval");
 }
@@ -337,11 +339,13 @@ void handleUpdateCanIoFlags(AsyncWebSocketClient* client, JsonDocument& doc) {
   CANCommand cmd;
   cmd.type = CMD_UPDATE_CANIO_FLAGS;
 
-  cmd.data.updateCanIoFlags.pot = doc.containsKey("pot") ? doc["pot"].as<uint16_t>() : 0;
-  cmd.data.updateCanIoFlags.pot2 = doc.containsKey("pot2") ? doc["pot2"].as<uint16_t>() : 0;
-  cmd.data.updateCanIoFlags.canio = doc.containsKey("canio") ? doc["canio"].as<uint8_t>() : 0;
-  cmd.data.updateCanIoFlags.cruisespeed = doc.containsKey("cruisespeed") ? doc["cruisespeed"].as<uint16_t>() : 0;
-  cmd.data.updateCanIoFlags.regenpreset = doc.containsKey("regenpreset") ? doc["regenpreset"].as<uint8_t>() : 0;
+  cmd.data.updateCanIoFlags.pot = doc["pot"].isNull() ? 0 : doc["pot"].as<uint16_t>();
+  cmd.data.updateCanIoFlags.pot2 = doc["pot2"].isNull() ? 0 : doc["pot2"].as<uint16_t>();
+  cmd.data.updateCanIoFlags.canio = doc["canio"].isNull() ? 0 : doc["canio"].as<uint8_t>();
+  cmd.data.updateCanIoFlags.cruisespeed =
+      doc["cruisespeed"].isNull() ? 0 : doc["cruisespeed"].as<uint16_t>();
+  cmd.data.updateCanIoFlags.regenpreset =
+      doc["regenpreset"].isNull() ? 0 : doc["regenpreset"].as<uint8_t>();
 
   queueCanCommand(cmd, "Update CAN IO flags");
 }
@@ -350,7 +354,7 @@ void handleStartSpotValues(AsyncWebSocketClient* client, JsonDocument& doc) {
   CANCommand cmd;
   cmd.type = CMD_START_SPOT_VALUES;
 
-  if (doc.containsKey("paramIds")) {
+  if (!doc["paramIds"].isNull()) {
     JsonArray paramIds = doc["paramIds"].as<JsonArray>();
     cmd.data.spotValues.paramCount = 0;
     for (JsonVariant id : paramIds) {
@@ -360,7 +364,7 @@ void handleStartSpotValues(AsyncWebSocketClient* client, JsonDocument& doc) {
     }
   }
 
-  if (doc.containsKey("interval")) {
+  if (!doc["interval"].isNull()) {
     cmd.data.spotValues.interval = doc["interval"].as<uint32_t>();
     if (cmd.data.spotValues.interval < SPOT_VALUES_INTERVAL_MIN_MS)
       cmd.data.spotValues.interval = SPOT_VALUES_INTERVAL_MIN_MS;
@@ -559,7 +563,7 @@ void handleGetParamValues(AsyncWebSocketClient* client, JsonDocument& doc) {
         if (!error) {
           for (const auto& pair : latestSpotValues) {
             String paramId = String(pair.first);
-            if (paramsDoc.containsKey(paramId)) {
+            if (!paramsDoc[paramId].isNull()) {
               paramsDoc[paramId]["value"] = pair.second;
             }
           }
@@ -568,14 +572,18 @@ void handleGetParamValues(AsyncWebSocketClient* client, JsonDocument& doc) {
         }
       }
 
-      String output = "{\"event\":\"paramValuesData\",\"data\":{\"nodeId\":";
-      output += nodeId;
-      output += ",\"rawParams\":";
-      output += json;
-      output += "}}";
-
-      client->text(output);
-      DBG_OUTPUT_PORT.printf("[WebSocket] Sent cached param values (%d bytes)\n", output.length());
+      if (sendParamValuesData(ws, client, nodeId, json)) {
+        DBG_OUTPUT_PORT.printf("[WebSocket] Sent cached param values (%d bytes)\n", json.length());
+      } else {
+        JsonDocument errorDoc;
+        errorDoc["event"] = "paramValuesError";
+        errorDoc["data"]["error"] = "Insufficient memory to send param values";
+        errorDoc["data"]["nodeId"] = nodeId;
+        String errorOutput;
+        serializeJson(errorDoc, errorOutput);
+        client->text(errorOutput);
+        DBG_OUTPUT_PORT.println("[WebSocket] Failed to send cached param values (memory/queue)");
+      }
       return;
     }
   }
@@ -864,7 +872,7 @@ void handleStartDevice(AsyncWebSocketClient* client, JsonDocument& doc) {
     return;
   }
 
-  uint32_t mode = doc.containsKey("mode") ? doc["mode"].as<uint32_t>() : 0;
+  uint32_t mode = doc["mode"].isNull() ? 0 : doc["mode"].as<uint32_t>();
 
   bool success = OICan::StartDevice(mode);
 
@@ -961,6 +969,18 @@ void onWebSocketEvent(AsyncWebSocket* server, AsyncWebSocketClient* client, AwsE
     serializeJson(doc, output);
     client->text(output);
 
+    // Also send current scan range so newly connected clients display the correct range immediately.
+    if (DeviceDiscovery::instance().isScanActive()) {
+      JsonDocument progressDoc;
+      progressDoc["event"] = "scanProgress";
+      progressDoc["data"]["currentNode"] = DeviceDiscovery::instance().getCurrentScanNode();
+      progressDoc["data"]["startNode"] = DeviceDiscovery::instance().getScanStartNode();
+      progressDoc["data"]["endNode"] = DeviceDiscovery::instance().getScanEndNode();
+      String progressOutput;
+      serializeJson(progressDoc, progressOutput);
+      client->text(progressOutput);
+    }
+
     // Send saved devices
     String devices = DeviceDiscovery::instance().getSavedDevices();
     JsonDocument devicesMsg;
@@ -1006,7 +1026,17 @@ void onWebSocketEvent(AsyncWebSocket* server, AsyncWebSocketClient* client, AwsE
       }
 
       // Dispatch to WebSocket handler
+#ifdef DEBUG
+      const uint32_t dispatchStartMs = millis();
+#endif
       dispatchWebSocketMessage(client, doc);
+#ifdef DEBUG
+      const uint32_t dispatchElapsedMs = millis() - dispatchStartMs;
+      if (dispatchElapsedMs >= 200) {
+        const char* action = doc["action"] | "<missing>";
+        DBG_OUTPUT_PORT.printf("[WDTDBG][WS] slow action '%s': %lu ms\n", action, (unsigned long)dispatchElapsedMs);
+      }
+#endif
     }
   }
 }
