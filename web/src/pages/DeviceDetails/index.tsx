@@ -41,7 +41,7 @@ function DeviceDetailsContent() {
   const [deviceInfoExpanded, setDeviceInfoExpanded] = useState(false)
 
   // Load parameter schema (does not block UI - downloads in background if needed)
-  const { schema: params } = useParamSchema(
+  const { schema: params, loading: schemaLoading } = useParamSchema(
     routeParams?.serial,
     savedNodeId > 0 ? savedNodeId : undefined
   )
@@ -232,7 +232,13 @@ function DeviceDetailsContent() {
             content: savedNodeId > 0 && routeParams?.serial ? (
               <>
                 {/* <DeviceControl serial={routeParams.serial} nodeId={savedNodeId} /> */}
-                <SpotValuesMonitor serial={routeParams.serial} nodeId={savedNodeId} showHeader={false} />
+                <SpotValuesMonitor
+                  serial={routeParams.serial}
+                  nodeId={savedNodeId}
+                  paramSchema={params}
+                  schemaLoading={schemaLoading}
+                  showHeader={false}
+                />
               </>
             ) : (
               <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-muted)' }}>
@@ -248,6 +254,7 @@ function DeviceDetailsContent() {
               <DeviceParameters
                 serial={routeParams.serial}
                 nodeId={nodeId}
+                schema={params}
                 onNodeIdChange={setNodeId}
                 onSaveNodeId={handleSaveNodeId}
               />
@@ -262,7 +269,7 @@ function DeviceDetailsContent() {
             id: 'can-mappings',
             label: 'CAN Mappings',
             content: routeParams?.serial && savedNodeId > 0 ? (
-              <CanMappingEditor serial={routeParams.serial} nodeId={savedNodeId} />
+              <CanMappingEditor paramSchema={params} />
             ) : (
               <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-muted)' }}>
                 {content.noDataAvailable || 'No data available'}
@@ -275,7 +282,7 @@ function DeviceDetailsContent() {
             label: 'CAN Messages',
             content: routeParams?.serial && savedNodeId > 0 ? (
               <>
-                <CanIoControl serial={routeParams.serial} nodeId={savedNodeId} />
+                <CanIoControl serial={routeParams.serial} nodeId={savedNodeId} schema={params} />
                 <CanMessageSender serial={routeParams.serial} nodeId={savedNodeId} />
               </>
             ) : (

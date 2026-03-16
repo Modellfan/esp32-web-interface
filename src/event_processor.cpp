@@ -1,5 +1,6 @@
 #include "event_processor.h"
 
+#include <Arduino.h>
 #include <ArduinoJson.h>
 
 #include <functional>
@@ -181,27 +182,40 @@ const char* serializeEvent(const CANEvent& evt, JsonDocument& doc) {
 static void handleJsonReadyEvent(AsyncWebSocket& ws, const CANEvent& evt) {
   uint32_t clientId = evt.data.jsonReady.clientId;
   AsyncWebSocketClient* client = ws.client(clientId);
+  DeviceConnection& conn = DeviceConnection::instance();
+  auto resumeSpotValuesIfPaused = []() {
+    if (SpotValuesManager::instance().resume()) {
+      DBG_OUTPUT_PORT.println("[EventProcessor] Resumed spot values after parameter download");
+    }
+  };
 
-  if (client == nullptr || !client->canSend()) {
-    DBG_OUTPUT_PORT.printf("[EventProcessor] Client %lu not found or can't send\n", (unsigned long)clientId);
+  if (client == nullptr || client->status() != WS_CONNECTED || !client->canSend() || client->queueIsFull()) {
+    DBG_OUTPUT_PORT.printf("[EventProcessor] Client %lu not ready status=%d queueLen=%u canSend=%d\n",
+                           (unsigned long)clientId, client != nullptr ? (int)client->status() : -1,
+                           client != nullptr ? (unsigned int)client->queueLen() : 0U,
+                           (client != nullptr && client->canSend()) ? 1 : 0);
+    resumeSpotValuesIfPaused();
     return;
   }
 
   if (!evt.data.jsonReady.success) {
+    const char* errorMessage =
+        conn.didLastJsonParseFail() ? "Failed to parse parameters JSON" : "Failed to download parameters";
+
     // Send error response
     JsonDocument errorDoc;
     errorDoc["event"] = "paramValuesError";
-    errorDoc["data"]["error"] = "Failed to download parameters";
+    errorDoc["data"]["error"] = errorMessage;
     errorDoc["data"]["nodeId"] = evt.data.jsonReady.nodeId;
     String errorOutput;
     serializeJson(errorDoc, errorOutput);
     client->text(errorOutput);
-    DBG_OUTPUT_PORT.println("[EventProcessor] Sent paramValuesError");
+    DBG_OUTPUT_PORT.printf("[EventProcessor] Sent paramValuesError (%s)\n", errorMessage);
+    resumeSpotValuesIfPaused();
     return;
   }
 
   // Get the cached JSON
-  DeviceConnection& conn = DeviceConnection::instance();
   String json = conn.getJsonReceiveBufferCopy();
 
   if (json.isEmpty()) {
@@ -212,11 +226,15 @@ static void handleJsonReadyEvent(AsyncWebSocket& ws, const CANEvent& evt) {
     String errorOutput;
     serializeJson(errorDoc, errorOutput);
     client->text(errorOutput);
+    resumeSpotValuesIfPaused();
     return;
   }
 
   DBG_OUTPUT_PORT.printf("[EventProcessor] Sending JSON to client %lu (%d bytes)\n", (unsigned long)clientId,
                          json.length());
+#ifdef DEBUG
+  logWebSocketDebugSummary("[WebSocket][DEBUG] Before paramValuesData", client);
+#endif
 
   // Merge with latest spot values
   const auto& latestSpotValues = SpotValuesManager::instance().getLatestValues();
@@ -235,8 +253,12 @@ static void handleJsonReadyEvent(AsyncWebSocket& ws, const CANEvent& evt) {
     }
   }
 
-  if (sendParamValuesData(ws, client, evt.data.jsonReady.nodeId, json)) {
+  const ParamValuesSendResult sendResult = sendParamValuesData(ws, client, evt.data.jsonReady.nodeId, json);
+  if (sendResult == ParamValuesSendResult::Success) {
     DBG_OUTPUT_PORT.printf("[EventProcessor] Sent param values (%d bytes)\n", json.length());
+#ifdef DEBUG
+    logWebSocketDebugSummary("[WebSocket][DEBUG] After paramValuesData", client);
+#endif
   } else {
     JsonDocument errorDoc;
     errorDoc["event"] = "paramValuesError";
@@ -245,8 +267,16 @@ static void handleJsonReadyEvent(AsyncWebSocket& ws, const CANEvent& evt) {
     String errorOutput;
     serializeJson(errorDoc, errorOutput);
     client->text(errorOutput);
-    DBG_OUTPUT_PORT.println("[EventProcessor] Failed to send param values (memory/queue)");
+    DBG_OUTPUT_PORT.printf(
+        "[EventProcessor] Failed to send param values result=%s clientStatus=%d queueLen=%u canSend=%d heap=%u "
+        "minHeap=%u payload=%u\n",
+        paramValuesSendResultToString(sendResult), client != nullptr ? (int)client->status() : -1,
+        client != nullptr ? (unsigned int)client->queueLen() : 0U,
+        (client != nullptr && client->canSend()) ? 1 : 0, (unsigned int)ESP.getFreeHeap(),
+        (unsigned int)ESP.getMinFreeHeap(), (unsigned int)json.length());
   }
+
+  resumeSpotValuesIfPaused();
 }
 
 void processEvents(AsyncWebSocket& ws) {
@@ -269,7 +299,17 @@ void processEvents(AsyncWebSocket& ws) {
 
     String output;
     serializeJson(doc, output);
+#ifdef DEBUG
+    if (!ws.availableForWriteAll()) {
+      DBG_OUTPUT_PORT.printf("[WebSocket][DEBUG] Broadcast backpressure event=%s bytes=%d clients=%u\n", eventName,
+                             output.length(), (unsigned int)ws.count());
+    }
+#endif
     ws.textAll(output);
+
+    if (evt.type == EVT_VALUE_SET && SpotValuesManager::instance().resume()) {
+      DBG_OUTPUT_PORT.println("[EventProcessor] Resumed spot values after parameter write");
+    }
   }
 }
 

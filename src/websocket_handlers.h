@@ -40,6 +40,7 @@ void handleStopSpotValues(AsyncWebSocketClient* client, JsonDocument& doc);
 void handleUpdateParam(AsyncWebSocketClient* client, JsonDocument& doc);
 void handleGetParamSchema(AsyncWebSocketClient* client, JsonDocument& doc);
 void handleGetParamValues(AsyncWebSocketClient* client, JsonDocument& doc);
+void handleGetParamValuesOnly(AsyncWebSocketClient* client, JsonDocument& doc);
 void handleReloadParams(AsyncWebSocketClient* client, JsonDocument& doc);
 void handleResetDevice(AsyncWebSocketClient* client, JsonDocument& doc);
 void handleDisconnect(AsyncWebSocketClient* client, JsonDocument& doc);

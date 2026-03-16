@@ -20,9 +20,38 @@
 // External references to globals from main.cpp
 extern AsyncWebSocket ws;
 
+#ifdef DEBUG
+std::map<uint32_t, WebSocketDebugState> g_webSocketDebugStates;
+std::recursive_mutex g_webSocketDebugStateMutex;
+#endif
+
 // ============================================================================
 // WebSocket Broadcast Helpers
 // ============================================================================
+
+namespace {
+
+void sendSavedDevicesSnapshot(AsyncWebSocketClient* client) {
+  if (client == nullptr) {
+    return;
+  }
+
+  String devices = DeviceDiscovery::instance().getSavedDevices();
+  if (devices.isEmpty()) {
+    devices = F("{\"devices\":{}}");
+  }
+
+  String output;
+  output.reserve(devices.length() + 33);
+  output = F("{\"event\":\"savedDevices\",\"data\":");
+  output += devices;
+  output += '}';
+
+  recordWebSocketOutbound(client, "savedDevices", output.length());
+  client->text(output);
+}
+
+}  // namespace
 
 void broadcastToWebSocket(const char* event, const char* data) {
   JsonDocument doc;
@@ -74,6 +103,7 @@ static const std::map<std::string, WebSocketHandler> wsHandlers = {{"startScan",
                                                                    {"updateParam", handleUpdateParam},
                                                                    {"getParamSchema", handleGetParamSchema},
                                                                    {"getParamValues", handleGetParamValues},
+                                                                   {"getParamValuesOnly", handleGetParamValuesOnly},
                                                                    {"reloadParams", handleReloadParams},
                                                                    {"resetDevice", handleResetDevice},
                                                                    {"disconnect", handleDisconnect},
@@ -417,10 +447,9 @@ void handleUpdateParam(AsyncWebSocketClient* client, JsonDocument& doc) {
   }
 
   // Temporarily pause spot values if active to avoid conflicts
-  bool wasSpotValuesActive = SpotValuesManager::instance().isActive();
-  if (wasSpotValuesActive) {
+  const bool pausedSpotValues = SpotValuesManager::instance().pause();
+  if (pausedSpotValues) {
     DBG_OUTPUT_PORT.println("[WebSocket] Temporarily pausing spot values for parameter write");
-    SpotValuesManager::instance().stop();
   }
 
   // Send the write asynchronously - response will come via EVT_VALUE_SET event
@@ -430,9 +459,8 @@ void handleUpdateParam(AsyncWebSocketClient* client, JsonDocument& doc) {
     DBG_OUTPUT_PORT.println("[WebSocket] ERROR: Failed to queue parameter update");
 
     // Resume spot values if we paused it
-    if (wasSpotValuesActive) {
-      // Note: Cannot resume here without knowing original params/interval
-      // The client will need to restart spot values after the error
+    if (pausedSpotValues && SpotValuesManager::instance().resume()) {
+      DBG_OUTPUT_PORT.println("[WebSocket] Resumed spot values after failed parameter write queue");
     }
 
     JsonDocument errorDoc;
@@ -447,8 +475,7 @@ void handleUpdateParam(AsyncWebSocketClient* client, JsonDocument& doc) {
 
   DBG_OUTPUT_PORT.printf("[WebSocket] Parameter %d update queued (value=%f)\n", paramId, value);
 
-  // Note: Spot values will be restarted by the UI after receiving paramUpdateResult
-  // Response will be sent when EVT_VALUE_SET event is processed by event_processor
+  // Spot values are resumed after the write result event is emitted.
 }
 
 void handleReloadParams(AsyncWebSocketClient* client, JsonDocument& doc) {
@@ -523,8 +550,6 @@ void handleGetParamSchema(AsyncWebSocketClient* client, JsonDocument& doc) {
   }
 }
 
-// Lightweight handler that only returns parameter values (id -> value mapping)
-// Used when schema is already cached on the client side
 void handleGetParamValues(AsyncWebSocketClient* client, JsonDocument& doc) {
   int nodeId = doc["nodeId"];
   DBG_OUTPUT_PORT.printf("[WebSocket] Get param values request for nodeId: %d\n", nodeId);
@@ -572,7 +597,8 @@ void handleGetParamValues(AsyncWebSocketClient* client, JsonDocument& doc) {
         }
       }
 
-      if (sendParamValuesData(ws, client, nodeId, json)) {
+      const ParamValuesSendResult sendResult = sendParamValuesData(ws, client, nodeId, json);
+      if (sendResult == ParamValuesSendResult::Success) {
         DBG_OUTPUT_PORT.printf("[WebSocket] Sent cached param values (%d bytes)\n", json.length());
       } else {
         JsonDocument errorDoc;
@@ -582,7 +608,12 @@ void handleGetParamValues(AsyncWebSocketClient* client, JsonDocument& doc) {
         String errorOutput;
         serializeJson(errorDoc, errorOutput);
         client->text(errorOutput);
-        DBG_OUTPUT_PORT.println("[WebSocket] Failed to send cached param values (memory/queue)");
+        DBG_OUTPUT_PORT.printf(
+            "[WebSocket] Failed to send cached param values result=%s clientStatus=%d queueLen=%u canSend=%d "
+            "heap=%u minHeap=%u payload=%u\n",
+            paramValuesSendResultToString(sendResult), (int)client->status(), (unsigned int)client->queueLen(),
+            client->canSend() ? 1 : 0, (unsigned int)ESP.getFreeHeap(), (unsigned int)ESP.getMinFreeHeap(),
+            (unsigned int)json.length());
       }
       return;
     }
@@ -616,6 +647,11 @@ void handleGetParamValues(AsyncWebSocketClient* client, JsonDocument& doc) {
 
   // Start async download
   uint32_t clientId = client->id();
+  const bool pausedSpotValues = SpotValuesManager::instance().pause();
+  if (pausedSpotValues) {
+    DBG_OUTPUT_PORT.println("[WebSocket] Temporarily pausing spot values for full parameter download");
+  }
+
   if (conn.startJsonDownloadAsync(clientId)) {
     // Send pending status - client will receive data via EVT_JSON_READY
     JsonDocument pendingDoc;
@@ -627,6 +663,10 @@ void handleGetParamValues(AsyncWebSocketClient* client, JsonDocument& doc) {
     client->text(pendingOutput);
     DBG_OUTPUT_PORT.printf("[WebSocket] Started async JSON download for client %lu\n", (unsigned long)clientId);
   } else {
+    if (pausedSpotValues && SpotValuesManager::instance().resume()) {
+      DBG_OUTPUT_PORT.println("[WebSocket] Resumed spot values after failed parameter download start");
+    }
+
     JsonDocument errorDoc;
     errorDoc["event"] = "paramValuesError";
     errorDoc["data"]["error"] = "Failed to start download";
@@ -636,6 +676,94 @@ void handleGetParamValues(AsyncWebSocketClient* client, JsonDocument& doc) {
     client->text(errorOutput);
     DBG_OUTPUT_PORT.println("[WebSocket] Failed to start JSON download");
   }
+}
+
+void handleGetParamValuesOnly(AsyncWebSocketClient* client, JsonDocument& doc) {
+  int nodeId = doc["nodeId"];
+  DBG_OUTPUT_PORT.printf("[WebSocket] Get param values only request for nodeId: %d\n", nodeId);
+
+  DeviceConnection& conn = DeviceConnection::instance();
+
+  if (conn.getNodeId() != nodeId) {
+    JsonDocument errorDoc;
+    errorDoc["event"] = "paramValuesError";
+    errorDoc["data"]["error"] = "Not connected to requested device";
+    errorDoc["data"]["nodeId"] = nodeId;
+    String errorOutput;
+    serializeJson(errorDoc, errorOutput);
+    client->text(errorOutput);
+    DBG_OUTPUT_PORT.println("[WebSocket] Sent paramValuesError - wrong node for values-only");
+    return;
+  }
+
+  const JsonDocument& cachedJson = conn.getCachedJson();
+  if (cachedJson.isNull() || cachedJson.size() == 0) {
+    DBG_OUTPUT_PORT.println("[WebSocket] No cached JSON for values-only request, falling back to full param download");
+    handleGetParamValues(client, doc);
+    return;
+  }
+
+  JsonObjectConst paramsRoot = cachedJson.as<JsonObjectConst>();
+  if (paramsRoot.isNull()) {
+    DBG_OUTPUT_PORT.println("[WebSocket] Cached JSON root is not an object for values-only request");
+    handleGetParamValues(client, doc);
+    return;
+  }
+
+  JsonDocument responseDoc;
+  responseDoc["event"] = "paramValuesOnly";
+  JsonObject data = responseDoc["data"].to<JsonObject>();
+  data["nodeId"] = nodeId;
+  JsonObject values = data["values"].to<JsonObject>();
+
+  const auto& latestSpotValues = SpotValuesManager::instance().getLatestValues();
+  size_t valueCount = 0;
+
+  for (JsonPairConst kv : paramsRoot) {
+    JsonObjectConst param = kv.value().as<JsonObjectConst>();
+    if (param.isNull() || param["value"].isNull()) {
+      continue;
+    }
+
+    int paramId = -1;
+    if (!param["id"].isNull()) {
+      paramId = param["id"].as<int>();
+    } else if (!param["i"].isNull()) {
+      paramId = param["i"].as<int>();
+    } else {
+      const char* key = kv.key().c_str();
+      char* end = nullptr;
+      long parsed = strtol(key, &end, 10);
+      if (end != nullptr && *end == '\0') {
+        paramId = (int)parsed;
+      }
+    }
+
+    if (paramId < 0) {
+      continue;
+    }
+
+    auto latestIt = latestSpotValues.find(paramId);
+    if (latestIt != latestSpotValues.end()) {
+      values[String(paramId)] = latestIt->second;
+    } else {
+      values[String(paramId)] = param["value"];
+    }
+    valueCount++;
+  }
+
+  if (valueCount == 0) {
+    DBG_OUTPUT_PORT.println("[WebSocket] No values extracted from cached JSON, falling back to full param payload");
+    handleGetParamValues(client, doc);
+    return;
+  }
+
+  String output;
+  serializeJson(responseDoc, output);
+  recordWebSocketOutbound(client, "paramValuesOnly", output.length());
+  client->text(output);
+  DBG_OUTPUT_PORT.printf("[WebSocket] Sent values-only param data (%u values, %u bytes)\n", (unsigned int)valueCount,
+                         (unsigned int)output.length());
 }
 
 void handleDisconnect(AsyncWebSocketClient* client, JsonDocument& doc) {
@@ -699,6 +827,20 @@ void handleAddCanMapping(AsyncWebSocketClient* client, JsonDocument& doc) {
   if (!DeviceConnection::instance().isIdle()) {
     DBG_OUTPUT_PORT.println("[WebSocket] ERROR: Cannot add mapping - device busy");
     sendDeviceBusyError(client, "canMappingError");
+    return;
+  }
+
+  uint32_t canId = doc["id"] | 0;
+  if (canId == 0 || canId > 0x7FF) {
+    JsonDocument responseDoc;
+    responseDoc["event"] = "canMappingError";
+    responseDoc["data"]["success"] = false;
+    responseDoc["data"]["error"] = "Invalid CAN ID (must be 0x001 to 0x7FF)";
+
+    String output;
+    serializeJson(responseDoc, output);
+    client->text(output);
+    DBG_OUTPUT_PORT.printf("[WebSocket] Rejecting CAN mapping with invalid CAN ID 0x%lX\n", (unsigned long)canId);
     return;
   }
 
@@ -958,6 +1100,11 @@ void onWebSocketEvent(AsyncWebSocket* server, AsyncWebSocketClient* client, AwsE
   ClientLockManager& lockMgr = ClientLockManager::instance();
 
   if (type == WS_EVT_CONNECT) {
+#ifdef DEBUG
+    setWebSocketDebugPeer(client);
+    client->keepAlivePeriod(15);
+    logWebSocketDebugSummary("[WebSocket][DEBUG] CONNECT", client);
+#endif
     DBG_OUTPUT_PORT.printf("WebSocket client #%lu connected from %s\n", (unsigned long)client->id(),
                            client->remoteIP().toString().c_str());
 
@@ -981,18 +1128,13 @@ void onWebSocketEvent(AsyncWebSocket* server, AsyncWebSocketClient* client, AwsE
       client->text(progressOutput);
     }
 
-    // Send saved devices
-    String devices = DeviceDiscovery::instance().getSavedDevices();
-    JsonDocument devicesMsg;
-    devicesMsg["event"] = "savedDevices";
-    JsonDocument devicesData;
-    deserializeJson(devicesData, devices);
-    devicesMsg["data"] = devicesData;
-    String devicesOutput;
-    serializeJson(devicesMsg, devicesOutput);
-    client->text(devicesOutput);
+    // Avoid deep ArduinoJson document copies on the AsyncTCP callback stack.
+    sendSavedDevicesSnapshot(client);
 
   } else if (type == WS_EVT_DISCONNECT) {
+#ifdef DEBUG
+    logWebSocketDebugSummary("[WebSocket][DEBUG] DISCONNECT", client);
+#endif
     DBG_OUTPUT_PORT.printf("WebSocket client #%lu disconnected\n", (unsigned long)client->id());
 
     // Release any device lock held by this client
@@ -1010,6 +1152,30 @@ void onWebSocketEvent(AsyncWebSocket* server, AsyncWebSocketClient* client, AwsE
       ws.textAll(output);
     }
 
+#ifdef DEBUG
+    freeWebSocketDebugState(client);
+#endif
+
+  } else if (type == WS_EVT_ERROR) {
+#ifdef DEBUG
+    const uint16_t errorCode = (arg != nullptr) ? *static_cast<uint16_t*>(arg) : 0;
+    const char* reason = reinterpret_cast<const char*>(data);
+    recordWebSocketCloseReason(client, errorCode, reason, len);
+    logWebSocketDebugSummary("[WebSocket][DEBUG] ERROR", client);
+    DBG_OUTPUT_PORT.printf("[WebSocket][DEBUG] client#%lu close/error code=%u reason=%.*s\n",
+                           (unsigned long)client->id(), errorCode, (int)len, reason != nullptr ? reason : "");
+#endif
+
+  } else if (type == WS_EVT_PING) {
+#ifdef DEBUG
+    logWebSocketDebugSummary("[WebSocket][DEBUG] PING", client);
+#endif
+
+  } else if (type == WS_EVT_PONG) {
+#ifdef DEBUG
+    logWebSocketDebugSummary("[WebSocket][DEBUG] PONG", client);
+#endif
+
   } else if (type == WS_EVT_DATA) {
     AwsFrameInfo* info = (AwsFrameInfo*)arg;
     if (info->final && info->index == 0 && info->len == len && info->opcode == WS_TEXT) {
@@ -1024,6 +1190,12 @@ void onWebSocketEvent(AsyncWebSocket* server, AsyncWebSocketClient* client, AwsE
         DBG_OUTPUT_PORT.printf("JSON parse error: %s\n", error.c_str());
         return;
       }
+
+#ifdef DEBUG
+      const char* action = doc["action"] | "<missing>";
+      recordWebSocketInbound(client, action, len);
+      logWebSocketDebugSummary("[WebSocket][DEBUG] DATA", client);
+#endif
 
       // Dispatch to WebSocket handler
 #ifdef DEBUG

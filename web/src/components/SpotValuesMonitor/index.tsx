@@ -1,18 +1,20 @@
 import { useEffect } from 'preact/hooks'
 import { useIntlayer } from 'preact-intlayer'
-import { useParamSchema } from '@hooks/useParamSchema'
 import { useWebSocketContext } from '@contexts/WebSocketContext'
 import { useDeviceDetailsContext } from '@contexts/DeviceDetailsContext'
 import MultiLineChart from '@components/MultiLineChart'
 import { LoadingSpinner } from '@components/LoadingSpinner'
 import { convertSpotValue } from '@utils/spotValueConversions'
 import { formatParameterValue } from '@utils/parameterDisplay'
+import { getParameterDisplayName, ParameterList } from '@utils/paramStorage'
 
 const MAX_HISTORY_POINTS = 100
 
 interface SpotValuesMonitorProps {
   serial: string
   nodeId: number
+  paramSchema?: ParameterList | null
+  schemaLoading?: boolean
   showHeader?: boolean
   showBackButton?: boolean
   onBack?: () => void
@@ -34,6 +36,8 @@ function normalizeSerial(serial: string | null | undefined): string {
 export default function SpotValuesMonitor({
   serial,
   nodeId,
+  paramSchema = null,
+  schemaLoading = false,
   showHeader = true,
   showBackButton = false,
   onBack
@@ -54,9 +58,11 @@ export default function SpotValuesMonitor({
   // Destructure monitoring state for easier access
   const { streaming, interval, spotValues, historicalData, selectedParams, connectedSerial } = monitoring
 
-  // Load cached parameter schema (does not trigger full download from OpenInverter)
-  // Tries: 1) localStorage cache, 2) ESP32 cache, 3) shows "no schema" message
-  const { schema: params, loading: schemaLoading, getDisplayName } = useParamSchema(serial, nodeId)
+  const params = paramSchema
+  const getDisplayName = (paramName: string) => {
+    if (!params || !params[paramName]) return paramName
+    return getParameterDisplayName(paramName, params[paramName])
+  }
 
   // WebSocket connection
   const { isConnected, sendMessage, subscribe } = useWebSocketContext()

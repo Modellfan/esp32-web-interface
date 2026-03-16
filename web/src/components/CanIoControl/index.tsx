@@ -4,11 +4,13 @@ import { useWebSocketContext } from '@contexts/WebSocketContext'
 import { useDeviceDetailsContext } from '@contexts/DeviceDetailsContext'
 import { useToast } from '@hooks/useToast'
 import { useParams } from '@hooks/useParams'
+import { ParameterList } from '@utils/paramStorage'
 import './styles.css'
 
 interface CanIoControlProps {
   serial: string
   nodeId: number
+  schema?: ParameterList | null
 }
 
 // CAN IO bit flags
@@ -19,13 +21,13 @@ const CAN_IO_FWD = 0x08
 const CAN_IO_REV = 0x10
 const CAN_IO_BMS = 0x20
 
-export default function CanIoControl({ serial, nodeId }: CanIoControlProps) {
+export default function CanIoControl({ serial, nodeId, schema }: CanIoControlProps) {
   const content = useIntlayer('can-io-control')
   const { isConnected, sendMessage, subscribe } = useWebSocketContext()
   const { showError, showSuccess } = useToast()
 
   // Get device parameters for pot min/max scaling
-  const { params } = useParams(serial, nodeId)
+  const { params } = useParams(serial, nodeId, schema)
 
   // Get state from context
   const {

@@ -31,6 +31,11 @@ QueueHandle_t sdoResponseQueue = nullptr;
 #define DBG_OUTPUT_PORT Serial
 
 #ifdef DEBUG
+#ifndef DEBUG_WDT_RUNTIME_LOGS
+#define DEBUG_WDT_RUNTIME_LOGS 0
+#endif
+
+#if DEBUG_WDT_RUNTIME_LOGS
 static constexpr uint32_t CAN_TASK_SLOW_STEP_US = 30000;
 static constexpr uint32_t CAN_TASK_SLOW_LOOP_US = 120000;
 static constexpr uint32_t CAN_TASK_HEARTBEAT_MS = 2000;
@@ -61,6 +66,7 @@ static void logCanTaskHeartbeat() {
       (unsigned int)uxTaskGetStackHighWaterMark(nullptr), (unsigned int)cmdDepth, (unsigned int)evtDepth,
       (unsigned int)txDepth, (unsigned int)sdoDepth);
 }
+#endif
 #endif
 
 // ============================================================================
@@ -632,8 +638,10 @@ void canTask(void* parameter) {
 
   while (true) {
 #ifdef DEBUG
+#if DEBUG_WDT_RUNTIME_LOGS
     const uint32_t loopStartUs = micros();
     uint32_t stepStartUs = loopStartUs;
+#endif
 #endif
 
     // Process commands from queue
@@ -641,15 +649,19 @@ void canTask(void* parameter) {
       dispatchCommand(cmd);
     }
 #ifdef DEBUG
+#if DEBUG_WDT_RUNTIME_LOGS
     logSlowCanTaskStep("command", micros() - stepStartUs);
     stepStartUs = micros();
+#endif
 #endif
 
     // Process CAN TX queue (frames from SDO protocol layer)
     processTxQueue();
 #ifdef DEBUG
+#if DEBUG_WDT_RUNTIME_LOGS
     logSlowCanTaskStep("tx", micros() - stepStartUs);
     stepStartUs = micros();
+#endif
 #endif
 
     // Periodic tasks
@@ -657,53 +669,67 @@ void canTask(void* parameter) {
     CanIntervalManager::instance().sendPendingMessages();
     CanIntervalManager::instance().sendCanIoMessage();
 #ifdef DEBUG
+#if DEBUG_WDT_RUNTIME_LOGS
     logSlowCanTaskStep("periodic", micros() - stepStartUs);
     stepStartUs = micros();
+#endif
 #endif
 
     // CAN message reception and routing
     receiveAndProcessCanMessages();
 #ifdef DEBUG
+#if DEBUG_WDT_RUNTIME_LOGS
     logSlowCanTaskStep("rx", micros() - stepStartUs);
     stepStartUs = micros();
+#endif
 #endif
 
     // Check for pending async write timeouts
     checkPendingWriteTimeouts();
 #ifdef DEBUG
+#if DEBUG_WDT_RUNTIME_LOGS
     logSlowCanTaskStep("pending-write", micros() - stepStartUs);
     stepStartUs = micros();
+#endif
 #endif
 
     // Device connection state machine
     DeviceConnection::instance().processConnection();
 #ifdef DEBUG
+#if DEBUG_WDT_RUNTIME_LOGS
     logSlowCanTaskStep("connection", micros() - stepStartUs);
     stepStartUs = micros();
+#endif
 #endif
 
     // Device scanning
     DeviceDiscovery::instance().processScan();
 #ifdef DEBUG
+#if DEBUG_WDT_RUNTIME_LOGS
     logSlowCanTaskStep("scan", micros() - stepStartUs);
     stepStartUs = micros();
+#endif
 #endif
 
     // Firmware update state handling
     processFirmwareUpdateState();
 #ifdef DEBUG
+#if DEBUG_WDT_RUNTIME_LOGS
     logSlowCanTaskStep("fw-state", micros() - stepStartUs);
+#endif
 #endif
 
     // Small delay to prevent task starvation
     vTaskDelay(pdMS_TO_TICKS(1));
 
 #ifdef DEBUG
+#if DEBUG_WDT_RUNTIME_LOGS
     const uint32_t totalLoopUs = micros() - loopStartUs;
     if (totalLoopUs >= CAN_TASK_SLOW_LOOP_US) {
       DBG_OUTPUT_PORT.printf("[WDTDBG][CAN] slow loop total=%lu us\n", (unsigned long)totalLoopUs);
     }
     logCanTaskHeartbeat();
+#endif
 #endif
   }
 }

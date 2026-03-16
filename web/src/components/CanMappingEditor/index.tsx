@@ -1,28 +1,29 @@
 import { useState } from 'preact/hooks'
 import { useIntlayer } from 'preact-intlayer'
 import { useCanMappings, CanMapping } from '@hooks/useCanMappings'
-import { useParams } from '@hooks/useParams'
 import { useToast } from '@hooks/useToast'
 import { LoadingSpinner } from '@components/LoadingSpinner'
-import { getParameterDisplayName } from '@utils/paramStorage'
+import { getParameterDisplayName, ParameterList, Parameter } from '@utils/paramStorage'
 import './styles.css'
 
 interface CanMappingEditorProps {
-  serial: string
-  nodeId: number
+  paramSchema: ParameterList | null
 }
 
-export default function CanMappingEditor({ serial, nodeId }: CanMappingEditorProps) {
+function getParamIdentifier(param: Parameter): number | undefined {
+  return param.id ?? param.i
+}
+
+export default function CanMappingEditor({ paramSchema }: CanMappingEditorProps) {
   const content = useIntlayer('can-mapping-editor')
   const { mappings, loading, error, addMapping, removeMapping } = useCanMappings()
-  const { params } = useParams(serial, nodeId)
   const { showError, showSuccess } = useToast()
 
   // Form state for adding new mapping
   const [showAddForm, setShowAddForm] = useState(false)
   const [formData, setFormData] = useState({
     isrx: false,
-    id: 0,
+    id: 0x180,
     paramid: 0,
     position: 0,
     length: 16,
@@ -30,19 +31,33 @@ export default function CanMappingEditor({ serial, nodeId }: CanMappingEditorPro
     offset: 0,
   })
 
+  const isValidCanId = formData.id > 0 && formData.id <= 0x7FF
+
   // Get parameter display name by ID
   const getParamName = (paramId: number): string => {
-    if (!params) return content.paramFallback({ paramId })
+    if (!paramSchema) return content.paramFallback({ paramId })
 
-    for (const [key, param] of Object.entries(params)) {
-      if (param.id === paramId) {
+    for (const [key, param] of Object.entries(paramSchema)) {
+      if (getParamIdentifier(param) === paramId) {
         return getParameterDisplayName(key, param)
       }
     }
+
     return content.paramFallback({ paramId })
   }
 
+  const selectableParams = paramSchema
+    ? Object.entries(paramSchema)
+      .filter(([, param]) => getParamIdentifier(param) !== undefined)
+      .sort((a, b) => getParameterDisplayName(a[0], a[1]).localeCompare(getParameterDisplayName(b[0], b[1])))
+    : []
+
   const handleAddMapping = async () => {
+    if (!isValidCanId) {
+      showError(content.invalidCanId)
+      return
+    }
+
     try {
       await addMapping(formData)
       showSuccess(content.addSuccess)
@@ -50,7 +65,7 @@ export default function CanMappingEditor({ serial, nodeId }: CanMappingEditorPro
       // Reset form
       setFormData({
         isrx: false,
-        id: 0,
+        id: 0x180,
         paramid: 0,
         position: 0,
         length: 16,
@@ -230,11 +245,18 @@ export default function CanMappingEditor({ serial, nodeId }: CanMappingEditorPro
                       onChange={(e) => setFormData({ ...formData, paramid: parseInt((e.currentTarget as HTMLSelectElement).value) })}
                     >
                       <option value={0}>{content.selectParameter}</option>
-                      {params && Object.entries(params).map(([key, param]) => (
-                        <option key={param.id} value={param.id}>
-                          {getParameterDisplayName(key, param)} (ID: {param.id})
-                        </option>
-                      ))}
+                      {selectableParams.map(([key, param]) => {
+                        const paramIdentifier = getParamIdentifier(param)
+                        if (paramIdentifier === undefined) {
+                          return null
+                        }
+
+                        return (
+                          <option key={paramIdentifier} value={paramIdentifier}>
+                            {getParameterDisplayName(key, param)} (ID: {paramIdentifier})
+                          </option>
+                        )
+                      })}
                     </select>
                   </label>
 
@@ -289,7 +311,7 @@ export default function CanMappingEditor({ serial, nodeId }: CanMappingEditorPro
                   <button
                     class="btn-save"
                     onClick={handleAddMapping}
-                    disabled={formData.paramid === 0}
+                    disabled={formData.paramid === 0 || !isValidCanId}
                   >
                     {content.addButton}
                   </button>

@@ -120,6 +120,7 @@ public:
 
   void setJsonTotalSize(int size) { jsonTotalSize_ = size; }
   int getJsonTotalSize() const { return jsonTotalSize_; }
+  bool didLastJsonParseFail() const { return lastJsonParseFailed_; }
 
   void clearJsonCache();
 
@@ -171,6 +172,7 @@ private:
   JsonDocument cachedParamJson_;
   String jsonReceiveBuffer_;
   int jsonTotalSize_ = 0;
+  bool lastJsonParseFailed_ = false;
   SemaphoreHandle_t jsonBufferMutex_ = nullptr;  // Protects jsonReceiveBuffer_
   uint32_t jsonRequestClientId_ = 0;             // WebSocket client that requested JSON download
 

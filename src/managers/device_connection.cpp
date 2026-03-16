@@ -32,6 +32,27 @@ extern QueueHandle_t canEventQueue;
 
 #define DBG_OUTPUT_PORT Serial
 
+namespace {
+bool isExpectedSdoResponseForNode(const twai_message_t& frame, uint8_t nodeId) {
+  return !frame.extd && frame.identifier == (SDO_RESPONSE_BASE_ID | nodeId);
+}
+
+bool isExpectedJsonAbort(const twai_message_t& frame) {
+  if (frame.data[0] != SDOProtocol::ABORT) {
+    return false;
+  }
+
+  const uint16_t index = frame.data[1] | (frame.data[2] << 8);
+  const uint8_t subIndex = frame.data[3];
+  return index == SDOProtocol::INDEX_STRINGS && subIndex == 0;
+}
+
+bool hasExpectedSegmentToggle(const twai_message_t& frame, bool toggleBit) {
+  const uint8_t expectedToggle = toggleBit ? SDOProtocol::TOGGLE_BIT : 0;
+  return (frame.data[0] & SDOProtocol::TOGGLE_BIT) == expectedToggle;
+}
+}  // namespace
+
 DeviceConnection::DeviceConnection() {
   // Initialize arrays
   for (int i = 0; i < 4; i++) {
@@ -49,8 +70,21 @@ DeviceConnection& DeviceConnection::instance() {
 }
 
 void DeviceConnection::setState(State newState) {
+  const bool wasDownloadingJson = isDownloadingJson();
   state_ = newState;
   resetStateStartTime();
+
+  if (newState == ERROR && wasDownloadingJson && jsonRequestClientId_ != 0 && canEventQueue != nullptr) {
+    CANEvent evt;
+    evt.type = EVT_JSON_READY;
+    evt.data.jsonReady.clientId = jsonRequestClientId_;
+    evt.data.jsonReady.nodeId = nodeId_;
+    evt.data.jsonReady.success = false;
+    xQueueSend(canEventQueue, &evt, 0);
+    DBG_OUTPUT_PORT.printf("[DeviceConnection] Sent JSON ready error event for client %lu\n",
+                           (unsigned long)jsonRequestClientId_);
+    jsonRequestClientId_ = 0;
+  }
 }
 
 void DeviceConnection::setSerialPart(uint8_t index, uint32_t value) {
@@ -91,6 +125,7 @@ void DeviceConnection::clearJsonCache() {
     cachedParamJson_.clear();
     jsonReceiveBuffer_ = "";
     jsonTotalSize_ = 0;
+    lastJsonParseFailed_ = false;
     xSemaphoreGive(jsonBufferMutex_);
   }
 }
@@ -140,6 +175,7 @@ void DeviceConnection::startJsonDownload() {
     return;
   }
 
+  lastJsonParseFailed_ = false;
   jsonReceiveBuffer_ = "";
   jsonTotalSize_ = 0;
   toggleBit_ = false;
@@ -155,6 +191,7 @@ bool DeviceConnection::startJsonDownloadAsync(uint32_t clientId) {
 
   jsonRequestClientId_ = clientId;
   clearJsonCache();
+  lastJsonParseFailed_ = false;
   jsonReceiveBuffer_ = "";
   jsonTotalSize_ = 0;
   toggleBit_ = false;
@@ -263,11 +300,28 @@ void DeviceConnection::processConnection() {
       break;
 
     case JSON_INIT_WAITING:
-      if (SDOProtocol::waitForResponse(&rxframe, 0)) {
-        if (rxframe.data[0] == SDOProtocol::ABORT) {
+      {
+      bool handledInitResponse = false;
+      while (SDOProtocol::waitForResponse(&rxframe, 0)) {
+        if (!isExpectedSdoResponseForNode(rxframe, nodeId_)) {
+          DBG_OUTPUT_PORT.printf("[OBTAIN_JSON] Ignoring init response for unexpected node 0x%03" PRIX32 "\r\n",
+                                 rxframe.identifier);
+          continue;
+        }
+
+        if (isExpectedJsonAbort(rxframe)) {
           DBG_OUTPUT_PORT.println("[DeviceConnection] SDO abort during JSON init");
           setState(ERROR);
+          handledInitResponse = true;
           break;
+        }
+
+        const uint16_t rxIndex = rxframe.data[1] | (rxframe.data[2] << 8);
+        const uint8_t rxSubIndex = rxframe.data[3];
+        if (rxIndex != SDOProtocol::INDEX_STRINGS || rxSubIndex != 0) {
+          DBG_OUTPUT_PORT.printf("[OBTAIN_JSON] Ignoring init response for index 0x%04X/%u\r\n", rxIndex,
+                                 rxSubIndex);
+          continue;
         }
 
         // Check for initiate upload response
@@ -275,8 +329,17 @@ void DeviceConnection::processConnection() {
           DBG_OUTPUT_PORT.println("[OBTAIN_JSON] Initiate upload response received");
 
           if (rxframe.data[0] & SDOProtocol::SIZE_SPECIFIED) {
-            jsonTotalSize_ = *(uint32_t*)&rxframe.data[4];
-            DBG_OUTPUT_PORT.printf("[OBTAIN_JSON] Total size: %d bytes\r\n", jsonTotalSize_);
+            const uint32_t reportedTotalSize = *(uint32_t*)&rxframe.data[4];
+            if (reportedTotalSize == 0xFFFFUL || reportedTotalSize == 0xFFFFFFFFUL) {
+              jsonTotalSize_ = 0;
+              DBG_OUTPUT_PORT.printf(
+                  "[OBTAIN_JSON] Reported total size: %lu bytes (device placeholder, treating as unknown)\r\n",
+                  (unsigned long)reportedTotalSize);
+            } else {
+              jsonTotalSize_ = (int)reportedTotalSize;
+              DBG_OUTPUT_PORT.printf("[OBTAIN_JSON] Reported total size: %lu bytes\r\n",
+                                     (unsigned long)reportedTotalSize);
+            }
 
             if (jsonProgressCallback_) {
               jsonProgressCallback_(0);
@@ -287,47 +350,88 @@ void DeviceConnection::processConnection() {
 
           // Request first segment
           state_ = JSON_SEGMENT_SENDING;
+          handledInitResponse = true;
+          break;
         }
-      } else if ((currentTime - requestSentTime_) >= SDO_TIMEOUT_MS) {
+      }
+      if (!handledInitResponse && (currentTime - requestSentTime_) >= SDO_TIMEOUT_MS) {
         DBG_OUTPUT_PORT.println("[DeviceConnection] JSON init timeout");
         setState(ERROR);
+      }
       }
       break;
 
     case JSON_SEGMENT_SENDING:
+      // Drop any late segment responses before asking for the next chunk.
+      SDOProtocol::clearPendingResponses();
       SDOProtocol::requestNextSegment(nodeId_, toggleBit_);
       requestSentTime_ = currentTime;
       state_ = JSON_SEGMENT_WAITING;
       break;
 
     case JSON_SEGMENT_WAITING:
-      if (SDOProtocol::waitForResponse(&rxframe, 0)) {
-        if (rxframe.data[0] == SDOProtocol::ABORT) {
+      {
+      bool handledSegmentResponse = false;
+      while (SDOProtocol::waitForResponse(&rxframe, 0)) {
+        if (!isExpectedSdoResponseForNode(rxframe, nodeId_)) {
+          DBG_OUTPUT_PORT.printf("[OBTAIN_JSON] Ignoring segment response for unexpected node 0x%03" PRIX32 "\r\n",
+                                 rxframe.identifier);
+          continue;
+        }
+
+        if (isExpectedJsonAbort(rxframe)) {
           DBG_OUTPUT_PORT.println("[DeviceConnection] SDO abort during JSON download");
           setState(ERROR);
+          handledSegmentResponse = true;
           break;
         }
 
-        // Check for last segment
-        if ((rxframe.data[0] & SDOProtocol::SIZE_SPECIFIED) && (rxframe.data[0] & SDOProtocol::READ) == 0) {
+        const uint8_t command = rxframe.data[0];
+        if ((command & 0xE0) != 0) {
+          DBG_OUTPUT_PORT.printf("[OBTAIN_JSON] Ignoring non-segment response cmd=0x%02X\r\n", command);
+          continue;
+        }
+
+        if (!hasExpectedSegmentToggle(rxframe, toggleBit_)) {
+          DBG_OUTPUT_PORT.printf("[OBTAIN_JSON] Ignoring stale segment with toggle=%d expected=%d\r\n",
+                                 (command & SDOProtocol::TOGGLE_BIT) ? 1 : 0, toggleBit_ ? 1 : 0);
+          continue;
+        }
+
+        const bool isLastSegment = (command & SDOProtocol::SIZE_SPECIFIED) != 0;
+        if (isLastSegment) {
           // Last segment - protect buffer access
           bool parseSuccess = false;
           if (xSemaphoreTake(jsonBufferMutex_, pdMS_TO_TICKS(50)) == pdTRUE) {
-            int size = 7 - ((rxframe.data[0] >> 1) & 0x7);
-            for (int i = 0; i < size; i++) {
-              jsonReceiveBuffer_ += (char)rxframe.data[1 + i];
-            }
-
-            DBG_OUTPUT_PORT.println("[OBTAIN_JSON] Download complete");
-            DBG_OUTPUT_PORT.printf("[OBTAIN_JSON] JSON size: %d bytes\r\n", jsonReceiveBuffer_.length());
-
-            // Parse JSON
-            DeserializationError error = deserializeJson(cachedParamJson_, jsonReceiveBuffer_);
-            if (error) {
-              DBG_OUTPUT_PORT.printf("[OBTAIN_JSON] Parse error: %s\r\n", error.c_str());
+            const int size = 7 - ((command >> 1) & 0x7);
+            if (size < 0 || size > 7) {
+              lastJsonParseFailed_ = true;
+              DBG_OUTPUT_PORT.printf("[OBTAIN_JSON] Invalid final segment size=%d\r\n", size);
+              cachedParamJson_.clear();
+              jsonReceiveBuffer_ = "";
+              jsonTotalSize_ = 0;
             } else {
-              DBG_OUTPUT_PORT.println("[OBTAIN_JSON] Parsed successfully");
-              parseSuccess = true;
+              for (int i = 0; i < size; i++) {
+                jsonReceiveBuffer_ += (char)rxframe.data[1 + i];
+              }
+
+              DBG_OUTPUT_PORT.println("[OBTAIN_JSON] Download complete");
+              DBG_OUTPUT_PORT.printf("[OBTAIN_JSON] JSON size: %d bytes\r\n", jsonReceiveBuffer_.length());
+
+              // Parse JSON
+              cachedParamJson_.clear();
+              DeserializationError error = deserializeJson(cachedParamJson_, jsonReceiveBuffer_);
+              if (error) {
+                lastJsonParseFailed_ = true;
+                DBG_OUTPUT_PORT.printf("[OBTAIN_JSON] Parse error: %s\r\n", error.c_str());
+                cachedParamJson_.clear();
+                jsonReceiveBuffer_ = "";
+                jsonTotalSize_ = 0;
+              } else {
+                lastJsonParseFailed_ = false;
+                DBG_OUTPUT_PORT.println("[OBTAIN_JSON] Parsed successfully");
+                parseSuccess = true;
+              }
             }
             xSemaphoreGive(jsonBufferMutex_);
           }
@@ -346,23 +450,33 @@ void DeviceConnection::processConnection() {
           }
 
           setState(IDLE);
+          handledSegmentResponse = true;
+          break;
         }
+
+        if ((command & 0x0F) != 0) {
+          DBG_OUTPUT_PORT.printf("[OBTAIN_JSON] Ignoring malformed segment cmd=0x%02X\r\n", command);
+          continue;
+        }
+
         // Normal segment
-        else if ((rxframe.data[0] & 0xE0) == 0 && rxframe.data[0] == (toggleBit_ << 4)) {
-          // Protect buffer access
-          if (xSemaphoreTake(jsonBufferMutex_, pdMS_TO_TICKS(50)) == pdTRUE) {
-            for (int i = 0; i < 7; i++) {
-              jsonReceiveBuffer_ += (char)rxframe.data[1 + i];
-            }
-            xSemaphoreGive(jsonBufferMutex_);
+        if (xSemaphoreTake(jsonBufferMutex_, pdMS_TO_TICKS(50)) == pdTRUE) {
+          for (int i = 0; i < 7; i++) {
+            jsonReceiveBuffer_ += (char)rxframe.data[1 + i];
           }
-          toggleBit_ = !toggleBit_;
-          state_ = JSON_SEGMENT_SENDING;
+          xSemaphoreGive(jsonBufferMutex_);
         }
-      } else if ((currentTime - requestSentTime_) >= SDO_TIMEOUT_MS) {
+        toggleBit_ = !toggleBit_;
+        state_ = JSON_SEGMENT_SENDING;
+        handledSegmentResponse = true;
+        break;
+      }
+      if (!handledSegmentResponse && (currentTime - requestSentTime_) >= SDO_TIMEOUT_MS) {
         // Timeout - retry
         DBG_OUTPUT_PORT.println("[DeviceConnection] JSON segment timeout, retrying");
+        SDOProtocol::clearPendingResponses();
         state_ = JSON_SEGMENT_SENDING;
+      }
       }
       break;
   }

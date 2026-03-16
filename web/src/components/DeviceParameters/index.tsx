@@ -8,10 +8,12 @@ import { api } from '@api/inverter'
 import ParameterCategory from './ParameterCategory'
 import { ProgressBar } from '@components/ProgressBar'
 import { LoadingSpinner } from '@components/LoadingSpinner'
+import { ParameterList } from '@utils/paramStorage'
 
 interface DeviceParametersProps {
   serial: string
   nodeId: string
+  schema?: ParameterList | null
   onNodeIdChange: (nodeId: string) => void
   onSaveNodeId: () => void
 }
@@ -19,6 +21,7 @@ interface DeviceParametersProps {
 export default function DeviceParameters({
   serial,
   nodeId,
+  schema,
   onNodeIdChange,
   onSaveNodeId
 }: DeviceParametersProps) {
@@ -28,7 +31,11 @@ export default function DeviceParameters({
   const { updateParameterValue } = useDeviceDetailsContext()
   // Parse nodeId to number for fetching params from specific device
   const numericNodeId = parseInt(nodeId)
-  const { params, loading, getDisplayName, downloadProgress, downloadTotal, refresh } = useParams(serial, isNaN(numericNodeId) ? undefined : numericNodeId)
+  const { params, loading, error, getDisplayName, downloadProgress, downloadTotal, refresh } = useParams(
+    serial,
+    isNaN(numericNodeId) ? undefined : numericNodeId,
+    schema
+  )
 
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set())
   const [isImporting, setIsImporting] = useState(false)
@@ -261,6 +268,22 @@ export default function DeviceParameters({
               />
             </div>
           )}
+        </div>
+      </section>
+    )
+  }
+
+  if (error) {
+    return (
+      <section id="device-parameters" class="card">
+        <h2 class="section-header">{content.deviceParameters}</h2>
+        <div class="loading" style={{ gap: '1rem' }}>
+          <p style={{ margin: 0, textAlign: 'center', color: 'var(--danger, #b91c1c)' }}>
+            {error}
+          </p>
+          <button class="btn-secondary" onClick={() => { void refresh() }}>
+            {content.tryAgain || 'Try Again'}
+          </button>
         </div>
       </section>
     )

@@ -21,6 +21,10 @@ This is a fork of the [esp32-web-interface](https://github.com/jsphuebner/esp32-
 - [ ] Improve UI for CAN mapping
 - [ ] Improve UI for sending CAN messages (canio, one shot, and interval messages)
 
+# Documentation
+
+- [Architecture Overview](architecture.md) - detailed software architecture, runtime flow, and file responsibility guide
+
 # Usage
 
 To use the web interface 2 things are needed :

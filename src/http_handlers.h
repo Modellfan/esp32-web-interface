@@ -9,6 +9,7 @@ void registerHttpRoutes(AsyncWebServer& server);
 void handleVersion(AsyncWebServerRequest* request);
 void handleDevices(AsyncWebServerRequest* request);
 void handleSettings(AsyncWebServerRequest* request);
+void handleParamsJson(AsyncWebServerRequest* request);
 void handleOtaUploadComplete(AsyncWebServerRequest* request);
 void handleOtaUpload(AsyncWebServerRequest* request, String filename, size_t index, uint8_t* data, size_t len,
                      bool final);

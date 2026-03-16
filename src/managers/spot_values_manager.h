@@ -25,8 +25,11 @@ public:
 
   // State management
   bool isActive() const { return !paramIds_.empty(); }
+  bool isPaused() const { return paused_; }
   void start(uint32_t intervalMs, const int* paramIds, int paramCount);
   void stop();
+  bool pause();
+  bool resume();
 
   // Processing (called from CAN task)
   void processQueue();  // Send pending requests (does NOT consume responses)
@@ -55,6 +58,7 @@ private:
 
   // State
   uint32_t lastCollectionTime_ = 0;
+  bool paused_ = false;
   std::deque<int> requestQueue_;        // Queue of pending parameter requests
   std::map<int, double> batch_;         // Accumulated values for current cycle
   std::map<int, double> latestValues_;  // Persistent cache of latest values

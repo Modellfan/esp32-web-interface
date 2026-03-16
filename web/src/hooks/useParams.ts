@@ -14,6 +14,13 @@ function nodeIdsMatch(a: unknown, b: unknown): boolean {
   return aNum !== null && bNum !== null && aNum === bNum
 }
 
+function getParameterIdentifier(param: { id?: number, i?: number } | undefined): number | null {
+  if (!param) return null
+  if (typeof param.id === 'number') return param.id
+  if (typeof param.i === 'number') return param.i
+  return null
+}
+
 /**
  * Parses enum definitions from unit strings
  * Format: "0=Rev1, 1=Rev2, 2=Rev3"
@@ -73,8 +80,13 @@ interface UseParamsResult {
  * Hook for managing device parameters with session caching in DeviceDetailsContext
  * @param deviceSerial - Device serial number for cache key
  * @param nodeId - Node ID to fetch parameters from (required for multi-client support)
+ * @param preloadedSchema - Optional schema already loaded elsewhere on the page
  */
-export function useParams(deviceSerial: string | undefined, nodeId: number | undefined): UseParamsResult {
+export function useParams(
+  deviceSerial: string | undefined,
+  nodeId: number | undefined,
+  preloadedSchema?: ParameterList | null
+): UseParamsResult {
   const explicitNodeId = nodeId
   const [params, setParams] = useState<ParameterList | null>(null)
   const [loading, setLoading] = useState(true)
@@ -87,6 +99,10 @@ export function useParams(deviceSerial: string | undefined, nodeId: number | und
 
   // Track which serial we currently have loaded to prevent redundant loads
   const loadedSerialRef = useRef<string | null>(null)
+  const deviceSerialRef = useRef<string | undefined>(deviceSerial)
+  const explicitNodeIdRef = useRef<number | undefined>(explicitNodeId)
+  const preloadedSchemaRef = useRef<ParameterList | null | undefined>(preloadedSchema)
+  const loadingRef = useRef(loading)
 
   // Track pending WebSocket requests
   const pendingSchemaRequestRef = useRef<{
@@ -105,6 +121,91 @@ export function useParams(deviceSerial: string | undefined, nodeId: number | und
 
   const refresh = async () => {
     setRefreshTrigger(prev => prev + 1)
+  }
+
+  useEffect(() => {
+    deviceSerialRef.current = deviceSerial
+    explicitNodeIdRef.current = explicitNodeId
+    preloadedSchemaRef.current = preloadedSchema
+    loadingRef.current = loading
+  }, [deviceSerial, explicitNodeId, preloadedSchema, loading])
+
+  const mergeParamsWithSchema = (rawParams: ParameterList, serial: string | undefined): ParameterList => {
+    let schema: ParameterList | null = serial ? ParamStorage.getSchema(serial) : null
+    if (!schema && preloadedSchemaRef.current) {
+      schema = preloadedSchemaRef.current
+    }
+
+    if (schema && Object.keys(rawParams).some(key => !isNaN(Number(key)))) {
+      console.log('Received values-only response, mapping to schema')
+      const valueById: Record<number, number | string> = {}
+      for (const [idStr, param] of Object.entries(rawParams)) {
+        const paramId = getParameterIdentifier(param)
+        if (paramId !== null) {
+          valueById[paramId] = param.value
+        }
+      }
+
+      const mappedParams: ParameterList = {}
+      for (const [key, paramDef] of Object.entries(schema)) {
+        const paramId = getParameterIdentifier(paramDef)
+        const value = paramId !== null ? valueById[paramId] : undefined
+        mappedParams[key] = {
+          ...paramDef,
+          value: value !== undefined ? value : paramDef.value
+        }
+      }
+      rawParams = mappedParams
+    }
+
+    if (!schema) {
+      console.log('Extracting schema from raw params for device:', serial)
+      schema = {}
+      for (const [key, param] of Object.entries(rawParams)) {
+        const { value, ...schemaFields } = param
+        schema[key] = schemaFields as any
+      }
+      schema = processParameters(schema)
+      if (serial) {
+        ParamStorage.saveSchema(serial, schema)
+      }
+    }
+
+    const mergedParams: ParameterList = {}
+    for (const [key, paramDef] of Object.entries(schema)) {
+      mergedParams[key] = {
+        ...paramDef,
+        value: rawParams[key]?.value ?? paramDef.value
+      }
+    }
+
+    return mergedParams
+  }
+
+  const commitLoadedParams = (mergedParams: ParameterList, serial: string | undefined) => {
+    setParams(mergedParams)
+    setLoading(false)
+    setError(null)
+    loadedSerialRef.current = serial ?? null
+    setCachedParameters(mergedParams)
+  }
+
+  const applyIncomingParams = (rawParams: ParameterList, nodeId: number, source: string): boolean => {
+    if (!nodeIdsMatch(explicitNodeIdRef.current, nodeId)) {
+      return false
+    }
+
+    try {
+      console.log(`[useParams] Applying ${source} for current node:`, nodeId)
+      const mergedParams = mergeParamsWithSchema(rawParams, deviceSerialRef.current)
+      commitLoadedParams(mergedParams, deviceSerialRef.current)
+      return true
+    } catch (error) {
+      console.error(`Failed to apply ${source}:`, error)
+      setError(error instanceof Error ? error.message : 'Failed to load parameters')
+      setLoading(false)
+      return false
+    }
   }
 
   // Request values via WebSocket and return a promise
@@ -273,16 +374,22 @@ export function useParams(deviceSerial: string | undefined, nodeId: number | und
             clearTimeout(pendingValuesRequestRef.current.timeoutId)
           }
 
+          // Apply immediately for the current device so the UI does not depend on
+          // the async request continuation to trigger the first render.
+          applyIncomingParams(rawParams, nodeId, 'paramValuesData')
+
           // Return the full raw params (contains both schema and values)
           pendingValuesRequestRef.current.resolve(rawParams)
           pendingValuesRequestRef.current = null
+        } else if (loadingRef.current && nodeIdsMatch(explicitNodeIdRef.current, nodeId)) {
+          applyIncomingParams(rawParams, nodeId, 'paramValuesData without pending request')
         }
       }
 
       // Handle values-only data response (optimized, no schema)
       else if (message.event === 'paramValuesOnly') {
         const nodeId = toNodeId(message.data?.nodeId)
-        const values = message.data.values as Record<string, number>
+        const values = message.data.values as Record<string, number | string>
         if (nodeId === null) {
           console.warn('[useParams] paramValuesOnly without valid nodeId:', message)
           return
@@ -309,11 +416,25 @@ export function useParams(deviceSerial: string | undefined, nodeId: number | und
           const rawParams: ParameterList = {}
           for (const [idStr, value] of Object.entries(values)) {
             // We'll create minimal param objects - caller will merge with schema
-            rawParams[idStr] = { id: parseInt(idStr), value } as any
+            const numericId = parseInt(idStr)
+            rawParams[idStr] = { id: numericId, i: numericId, value } as any
           }
+
+          // Apply immediately for the current device so first-load rendering does
+          // not depend on the async request continuation.
+          applyIncomingParams(rawParams, nodeId, 'paramValuesOnly')
 
           pendingValuesRequestRef.current.resolve(rawParams)
           pendingValuesRequestRef.current = null
+        } else if (loadingRef.current && nodeIdsMatch(explicitNodeIdRef.current, nodeId)) {
+          console.log('[useParams] Applying paramValuesOnly without matching pending request for current node:', nodeId)
+
+          const rawParams: ParameterList = {}
+          for (const [idStr, value] of Object.entries(values)) {
+            const numericId = parseInt(idStr)
+            rawParams[idStr] = { id: numericId, i: numericId, value } as any
+          }
+          applyIncomingParams(rawParams, nodeId, 'paramValuesOnly without pending request')
         }
       }
 
@@ -403,17 +524,19 @@ export function useParams(deviceSerial: string | undefined, nodeId: number | und
         setDownloadProgress(0)
         setDownloadTotal(0) // Reset for new download
 
-        // Check for cached schema in localStorage
-        let schema: ParameterList | null = !forceRefresh ? ParamStorage.getSchema(deviceSerial) : null
+        const cachedSchema = ParamStorage.getSchema(deviceSerial)
+        const hasSchema = cachedSchema !== null || !!preloadedSchemaRef.current
 
-        if (schema) {
+        if (!cachedSchema && preloadedSchemaRef.current) {
+          console.log('Using preloaded schema from page state for device:', deviceSerial)
+        } else if (cachedSchema) {
           console.log('Using cached schema from localStorage for device:', deviceSerial)
         }
 
-        // Always fetch full parameters from device
+        // If schema is cached, request the smaller values-only payload.
         let rawParams: ParameterList
         try {
-          rawParams = await requestValuesViaWebSocket(explicitNodeId, false)
+          rawParams = await requestValuesViaWebSocket(explicitNodeId, hasSchema)
 
           // Check if request was aborted while waiting
           if (abortController.signal.aborted) {
@@ -429,60 +552,11 @@ export function useParams(deviceSerial: string | undefined, nodeId: number | und
           throw err // Re-throw if not aborted
         }
 
-        // If we got values-only response (param ids as keys), we need to map them to schema keys
-        if (schema && Object.keys(rawParams).some(key => !isNaN(Number(key)))) {
-          console.log('Received values-only response, mapping to schema')
-          const valueById: Record<number, number> = {}
-          for (const [idStr, param] of Object.entries(rawParams)) {
-            valueById[param.id] = param.value
-          }
-          
-          // Create new rawParams with proper keys from schema
-          const mappedParams: ParameterList = {}
-          for (const [key, paramDef] of Object.entries(schema)) {
-            const value = valueById[paramDef.id]
-            mappedParams[key] = {
-              ...paramDef,
-              value: value !== undefined ? value : paramDef.value
-            }
-          }
-          rawParams = mappedParams
-        }
-
-        // If no cached schema, extract from rawParams and cache it
-        if (!schema) {
-          console.log('Extracting schema from raw params for device:', deviceSerial)
-          schema = {}
-          for (const [key, param] of Object.entries(rawParams)) {
-            // Strip 'value' field for schema
-            const { value, ...schemaFields } = param
-            schema[key] = schemaFields as any
-          }
-          // Process schema to parse enums from unit strings
-          schema = processParameters(schema)
-          // Save schema to localStorage for future use
-          ParamStorage.saveSchema(deviceSerial, schema)
-        }
-
-        // Merge cached schema with fresh values from rawParams
-        const mergedParams: ParameterList = {}
-        for (const [key, paramDef] of Object.entries(schema)) {
-          mergedParams[key] = {
-            ...paramDef,
-            // Use value from rawParams (fresh from device)
-            value: rawParams[key]?.value ?? paramDef.value
-          }
-        }
+        const mergedParams = mergeParamsWithSchema(rawParams, deviceSerial)
 
         // Check if aborted before setting state
         if (!abortController.signal.aborted) {
-          setParams(mergedParams)
-          setLoading(false)
-          setError(null)
-          loadedSerialRef.current = deviceSerial
-          
-          // Cache parameters in context for persistence between tab changes
-          setCachedParameters(mergedParams)
+          commitLoadedParams(mergedParams, deviceSerial)
         }
 
         console.log('Successfully loaded parameters for device:', deviceSerial)
@@ -527,7 +601,14 @@ export function useParams(deviceSerial: string | undefined, nodeId: number | und
         pendingValuesRequestRef.current = null
       }
     }
-  }, [deviceSerial, refreshTrigger, explicitNodeId, sendMessage])
+  }, [
+    deviceSerial,
+    refreshTrigger,
+    explicitNodeId,
+    // Don't restart an in-flight values request just because schema arrived in parallel.
+    // A full paramValuesData response already contains the schema we need.
+    sendMessage,
+  ])
 
   // Sync params state with context cache when it changes (for real-time updates)
   useEffect(() => {

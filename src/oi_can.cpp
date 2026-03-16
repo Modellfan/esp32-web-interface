@@ -315,10 +315,16 @@ SetResult AddCanMapping(String json) {
     return UnknownIndex;
   }
 
+  uint32_t cobId = doc["id"].as<uint32_t>();
+  if (cobId == 0 || cobId > 0x7FF) {
+    DBG_OUTPUT_PORT.printf("Add: Invalid COB ID %lu\n", (unsigned long)cobId);
+    return UnknownIndex;
+  }
+
   int index = doc["isrx"] ? SDOProtocol::INDEX_MAP_RX : SDOProtocol::INDEX_MAP_TX;
 
   SDOProtocol::clearPendingResponses();
-  SDOProtocol::setValue(conn.getNodeId(), index, 0, (uint32_t)doc["id"]);  // Send CAN Id
+  SDOProtocol::setValue(conn.getNodeId(), index, 0, cobId);  // Send CAN Id
 
   if (SDOProtocol::waitForResponse(&rxframe, pdMS_TO_TICKS(10))) {
     DBG_OUTPUT_PORT.println("Sent COB Id");

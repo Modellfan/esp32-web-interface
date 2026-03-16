@@ -10,6 +10,7 @@
 
 #include "managers/device_connection.h"
 #include "managers/device_discovery.h"
+#include "managers/spot_values_manager.h"
 
 // External references to globals from main.cpp
 extern AsyncWebSocket ws;
@@ -161,6 +162,122 @@ void handleSettings(AsyncWebServerRequest* request) {
   }
 }
 
+void handleParamsJson(AsyncWebServerRequest* request) {
+  DeviceConnection& conn = DeviceConnection::instance();
+
+  const bool hasNodeIdArg = request->hasArg("nodeId");
+  const uint8_t requestedNodeId = hasNodeIdArg ? (uint8_t)request->arg("nodeId").toInt() : conn.getNodeId();
+  const bool forceReload = request->hasArg("reload") &&
+                           (request->arg("reload") == "1" || request->arg("reload").equalsIgnoreCase("true"));
+  const bool asAttachment = request->hasArg("download") &&
+                            (request->arg("download") == "1" || request->arg("download").equalsIgnoreCase("true"));
+
+  if (requestedNodeId == 0) {
+    request->send(400, "application/json", "{\"error\":\"Missing or invalid nodeId\"}");
+    return;
+  }
+
+  if (conn.getNodeId() != requestedNodeId) {
+    JsonDocument doc;
+    doc["error"] = "Not connected to requested device";
+    doc["nodeId"] = requestedNodeId;
+    doc["connectedNodeId"] = conn.getNodeId();
+    String output;
+    serializeJson(doc, output);
+    request->send(409, "application/json", output);
+    return;
+  }
+
+  if (forceReload) {
+    if (!conn.isIdle()) {
+      JsonDocument doc;
+      doc["status"] = conn.isDownloadingJson() ? "pending" : "busy";
+      doc["nodeId"] = requestedNodeId;
+      doc["message"] = conn.isDownloadingJson() ? "Parameter download already in progress" : "Device is busy";
+      String output;
+      serializeJson(doc, output);
+      request->send(conn.isDownloadingJson() ? 202 : 409, "application/json", output);
+      return;
+    }
+
+    conn.startJsonDownload();
+
+    JsonDocument doc;
+    doc["status"] = "pending";
+    doc["nodeId"] = requestedNodeId;
+    doc["message"] = "Started parameter download";
+    String output;
+    serializeJson(doc, output);
+    request->send(202, "application/json", output);
+    return;
+  }
+
+  String json = conn.getJsonReceiveBufferCopy();
+  const bool hasCachedJson = json.length() >= 5 && json != "{}" && !conn.getCachedJson().isNull() &&
+                             conn.getCachedJson().size() > 0;
+
+  if (!hasCachedJson) {
+    if (conn.isDownloadingJson()) {
+      JsonDocument doc;
+      doc["status"] = "pending";
+      doc["nodeId"] = requestedNodeId;
+      doc["message"] = "Parameter download in progress";
+      String output;
+      serializeJson(doc, output);
+      request->send(202, "application/json", output);
+      return;
+    }
+
+    if (!conn.isIdle()) {
+      JsonDocument doc;
+      doc["status"] = "busy";
+      doc["nodeId"] = requestedNodeId;
+      doc["message"] = "Device is busy";
+      String output;
+      serializeJson(doc, output);
+      request->send(409, "application/json", output);
+      return;
+    }
+
+    conn.startJsonDownload();
+
+    JsonDocument doc;
+    doc["status"] = "pending";
+    doc["nodeId"] = requestedNodeId;
+    doc["message"] = "Started parameter download";
+    String output;
+    serializeJson(doc, output);
+    request->send(202, "application/json", output);
+    return;
+  }
+
+  const auto& latestSpotValues = SpotValuesManager::instance().getLatestValues();
+  if (!latestSpotValues.empty()) {
+    JsonDocument paramsDoc;
+    const DeserializationError error = deserializeJson(paramsDoc, json);
+    if (!error) {
+      for (const auto& pair : latestSpotValues) {
+        const String paramId = String(pair.first);
+        if (!paramsDoc[paramId].isNull()) {
+          paramsDoc[paramId]["value"] = pair.second;
+        }
+      }
+      json = "";
+      serializeJson(paramsDoc, json);
+    }
+  }
+
+  AsyncWebServerResponse* response = request->beginResponse(200, "application/json", json);
+  response->addHeader("Cache-Control", "no-store");
+  if (asAttachment) {
+    String serial = conn.getSerial();
+    serial.replace(':', '-');
+    response->addHeader("Content-Disposition",
+                        String("attachment; filename=\"params-") + serial + "-" + String(requestedNodeId) + ".json\"");
+  }
+  request->send(response);
+}
+
 // Handle OTA upload complete
 void handleOtaUploadComplete(AsyncWebServerRequest* request) {
   // Firmware update completion is handled via WebSocket events
@@ -252,6 +369,7 @@ void registerHttpRoutes(AsyncWebServer& server) {
   server.on("/version", HTTP_GET, handleVersion);
   server.on("/devices", HTTP_GET, handleDevices);
   server.on("/settings", HTTP_GET, handleSettings);
+  server.on("/params.json", HTTP_GET, handleParamsJson);
   server.on("/ota/upload", HTTP_POST, handleOtaUploadComplete, handleOtaUpload);
   server.onNotFound(handleFileRequest);
 }

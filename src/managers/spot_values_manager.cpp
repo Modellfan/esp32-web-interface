@@ -21,6 +21,7 @@ void SpotValuesManager::setParamIds(const std::vector<int>& paramIds) {
 
 void SpotValuesManager::start(uint32_t intervalMs, const int* paramIds, int paramCount) {
   interval_ = intervalMs;
+  paused_ = false;
   paramIds_.clear();
   for (int i = 0; i < paramCount; i++) {
     paramIds_.push_back(paramIds[i]);
@@ -33,13 +34,40 @@ void SpotValuesManager::stop() {
   // Flush any remaining batched values before stopping
   flushBatch();
 
+  paused_ = false;
   paramIds_.clear();
   requestQueue_.clear();
   latestValues_.clear();
   batch_.clear();
 }
 
+bool SpotValuesManager::pause() {
+  if (!isActive() || paused_) {
+    return false;
+  }
+
+  paused_ = true;
+  requestQueue_.clear();
+  batch_.clear();
+  return true;
+}
+
+bool SpotValuesManager::resume() {
+  if (!isActive() || !paused_) {
+    return false;
+  }
+
+  paused_ = false;
+  lastCollectionTime_ = millis();
+  reloadQueue();
+  return true;
+}
+
 void SpotValuesManager::processQueue() {
+  if (paused_) {
+    return;
+  }
+
   // Try to send one request from queue (if rate limit allows)
   // NOTE: Does NOT consume responses - responses are routed by CAN task via handleResponse()
   if (!requestQueue_.empty()) {
@@ -68,14 +96,19 @@ bool SpotValuesManager::isWaitingForParam(int paramId) const {
 }
 
 void SpotValuesManager::handleResponse(int paramId, double value) {
-  // Add to batch (map auto-replaces if param already exists)
-  batch_[paramId] = value;
   // Also update persistent cache for getParamValues
   latestValues_[paramId] = value;
+
+  if (paused_) {
+    return;
+  }
+
+  // Add to batch (map auto-replaces if param already exists)
+  batch_[paramId] = value;
 }
 
 void SpotValuesManager::reloadQueue() {
-  if (!DeviceConnection::instance().isIdle()) {
+  if (paused_ || !DeviceConnection::instance().isIdle()) {
     return;
   }
 

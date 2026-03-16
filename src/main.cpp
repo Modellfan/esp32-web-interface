@@ -42,6 +42,10 @@ AsyncWebSocket ws("/ws");
 Config config;
 
 namespace {
+#ifndef DEBUG_WDT_RUNTIME_LOGS
+#define DEBUG_WDT_RUNTIME_LOGS 0
+#endif
+
 const char* resetReasonToString(esp_reset_reason_t reason) {
   switch (reason) {
     case ESP_RST_UNKNOWN:
@@ -292,31 +296,40 @@ void setup(void) {
 void loop(void) {
 #ifdef DEBUG
   handleSerialDebugCommands();
+#if DEBUG_WDT_RUNTIME_LOGS
   const uint32_t loopStartUs = micros();
   uint32_t opStartUs = micros();
+#endif
 #endif
 
   ws.cleanupClients();
 #ifdef DEBUG
+#if DEBUG_WDT_RUNTIME_LOGS
   const uint32_t wsCleanupUs = micros() - opStartUs;
   opStartUs = micros();
+#endif
 #endif
 
   ArduinoOTA.handle();
 #ifdef DEBUG
+#if DEBUG_WDT_RUNTIME_LOGS
   const uint32_t otaHandleUs = micros() - opStartUs;
   opStartUs = micros();
+#endif
 #endif
 
   // Process events from CAN task and firmware progress
   EventProcessor::processEvents(ws);
 #ifdef DEBUG
+#if DEBUG_WDT_RUNTIME_LOGS
   const uint32_t eventProcessUs = micros() - opStartUs;
   opStartUs = micros();
+#endif
 #endif
 
   EventProcessor::processFirmwareProgress(ws);
 #ifdef DEBUG
+#if DEBUG_WDT_RUNTIME_LOGS
   const uint32_t fwProcessUs = micros() - opStartUs;
   const uint32_t loopElapsedUs = micros() - loopStartUs;
 
@@ -333,5 +346,6 @@ void loop(void) {
     printRuntimeStatus("loop");
     lastHeartbeatMs = nowMs;
   }
+#endif
 #endif
 }

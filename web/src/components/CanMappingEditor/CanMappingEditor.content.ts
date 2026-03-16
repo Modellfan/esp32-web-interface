@@ -151,6 +151,10 @@ const canMappingEditorContent = {
       en: 'Failed to add CAN mapping',
       de: 'Fehler beim Hinzufügen der CAN-Zuordnung',
     }),
+    invalidCanId: t({
+      en: 'Invalid CAN ID. Use 0x001 to 0x7FF.',
+      de: 'Ungültige CAN ID. Verwende 0x001 bis 0x7FF.',
+    }),
     removeError: t({
       en: 'Failed to remove CAN mapping',
       de: 'Fehler beim Entfernen der CAN-Zuordnung',
