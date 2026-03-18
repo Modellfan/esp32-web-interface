@@ -172,6 +172,10 @@ void handleParamsJson(AsyncWebServerRequest* request) {
   const bool asAttachment = request->hasArg("download") &&
                             (request->arg("download") == "1" || request->arg("download").equalsIgnoreCase("true"));
 
+  DBG_OUTPUT_PORT.printf("[HTTP] GET /params.json nodeId=%u reload=%d download=%d connectedNodeId=%u state=%d\n",
+                         (unsigned int)requestedNodeId, forceReload ? 1 : 0, asAttachment ? 1 : 0,
+                         (unsigned int)conn.getNodeId(), (int)conn.getState());
+
   if (requestedNodeId == 0) {
     request->send(400, "application/json", "{\"error\":\"Missing or invalid nodeId\"}");
     return;
@@ -267,7 +271,7 @@ void handleParamsJson(AsyncWebServerRequest* request) {
     }
   }
 
-  AsyncWebServerResponse* response = request->beginResponse(200, "application/json", json);
+  AsyncResponseStream* response = request->beginResponseStream("application/json");
   response->addHeader("Cache-Control", "no-store");
   if (asAttachment) {
     String serial = conn.getSerial();
@@ -275,6 +279,7 @@ void handleParamsJson(AsyncWebServerRequest* request) {
     response->addHeader("Content-Disposition",
                         String("attachment; filename=\"params-") + serial + "-" + String(requestedNodeId) + ".json\"");
   }
+  response->print(json);
   request->send(response);
 }
 

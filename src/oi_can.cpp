@@ -186,13 +186,29 @@ static float parseGainFromResponse(const twai_message_t& frame) {
 }
 
 // Helper: Request SDO element and wait for non-abort response
-// Returns true if got valid response, false on timeout or abort
+// Returns true if got matching non-abort response, false on timeout or abort
 static bool requestMappingElement(uint16_t index, uint8_t subIndex, twai_message_t& response) {
+  SDOProtocol::clearPendingResponses();
   SDOProtocol::requestElement(conn.getNodeId(), index, subIndex);
-  if (!SDOProtocol::waitForResponse(&response, pdMS_TO_TICKS(10))) {
-    return false;  // Timeout
+
+  const TickType_t timeout = pdMS_TO_TICKS(10);
+  const TickType_t startTick = xTaskGetTickCount();
+
+  while (true) {
+    const TickType_t elapsed = xTaskGetTickCount() - startTick;
+    const TickType_t remainingTimeout = (elapsed < timeout) ? (timeout - elapsed) : 0;
+    if (remainingTimeout == 0 || !SDOProtocol::waitForResponse(&response, remainingTimeout)) {
+      return false;  // Timeout
+    }
+
+    if (!isValidSdoResponse(response, conn.getNodeId(), index) || response.data[3] != subIndex) {
+      DBG_OUTPUT_PORT.printf("Ignoring unrelated mapping response idx=0x%04X/%u while waiting for 0x%04X/%u\r\n",
+                             response.data[1] | (response.data[2] << 8), response.data[3], index, subIndex);
+      continue;
+    }
+
+    return response.data[0] != SDOProtocol::ABORT;
   }
-  return response.data[0] != SDOProtocol::ABORT;
 }
 
 // Helper: Retrieve all mappings for one direction (TX or RX)

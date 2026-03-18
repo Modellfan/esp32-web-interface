@@ -806,7 +806,16 @@ void handleGetCanMappings(AsyncWebSocketClient* client, JsonDocument& doc) {
     return;
   }
 
+  const bool pausedSpotValues = SpotValuesManager::instance().pause();
+  if (pausedSpotValues) {
+    DBG_OUTPUT_PORT.println("[WebSocket] Temporarily pausing spot values for CAN mapping read");
+  }
+
   String mappingsJson = OICan::GetCanMapping();
+
+  if (pausedSpotValues && SpotValuesManager::instance().resume()) {
+    DBG_OUTPUT_PORT.println("[WebSocket] Resumed spot values after CAN mapping read");
+  }
 
   JsonDocument responseDoc;
   responseDoc["event"] = "canMappingsData";
@@ -856,7 +865,16 @@ void handleAddCanMapping(AsyncWebSocketClient* client, JsonDocument& doc) {
   String mappingJson;
   serializeJson(mappingDoc, mappingJson);
 
+  const bool pausedSpotValues = SpotValuesManager::instance().pause();
+  if (pausedSpotValues) {
+    DBG_OUTPUT_PORT.println("[WebSocket] Temporarily pausing spot values for CAN mapping write");
+  }
+
   OICan::SetResult result = OICan::AddCanMapping(mappingJson);
+
+  if (pausedSpotValues && SpotValuesManager::instance().resume()) {
+    DBG_OUTPUT_PORT.println("[WebSocket] Resumed spot values after CAN mapping write");
+  }
 
   JsonDocument responseDoc;
   if (result == OICan::Ok) {
@@ -898,7 +916,16 @@ void handleRemoveCanMapping(AsyncWebSocketClient* client, JsonDocument& doc) {
   String mappingJson;
   serializeJson(mappingDoc, mappingJson);
 
+  const bool pausedSpotValues = SpotValuesManager::instance().pause();
+  if (pausedSpotValues) {
+    DBG_OUTPUT_PORT.println("[WebSocket] Temporarily pausing spot values for CAN mapping removal");
+  }
+
   OICan::SetResult result = OICan::RemoveCanMapping(mappingJson);
+
+  if (pausedSpotValues && SpotValuesManager::instance().resume()) {
+    DBG_OUTPUT_PORT.println("[WebSocket] Resumed spot values after CAN mapping removal");
+  }
 
   JsonDocument responseDoc;
   if (result == OICan::Ok) {

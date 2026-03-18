@@ -253,13 +253,7 @@ export function DeviceProvider({ children }: DeviceProviderProps) {
     // Save to localStorage as last connected device
     saveLastDevice(serial, nodeId)
     setLastConnectedSerial(serial)
-
-    // Send connection command via WebSocket
-    sendMessage('connect', {
-      nodeId,
-      serial
-    })
-  }, [sendMessage])
+  }, [])
 
   const isDeviceOnline = useCallback((serial: string): boolean => {
     // During active scanning, device is online if seen in current or previous cycle

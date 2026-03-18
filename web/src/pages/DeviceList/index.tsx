@@ -176,12 +176,6 @@ export default function DeviceList() {
     saveLastDevice(serial, nodeId)
     setLastConnectedSerial(serial)
 
-    // Send connection command via WebSocket
-    sendMessage('connect', {
-      nodeId: nodeId,
-      serial: serial
-    })
-
     // Navigate to device settings page
     setLocation(`/devices/${serial}`)
   }
