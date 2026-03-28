@@ -48,6 +48,7 @@
 #include <ESPmDNS.h>
 #include <ArduinoOTA.h>
 #include <FS.h>
+#include <SPIFFS.h>
 #include <Ticker.h>
 #include <StreamString.h>
 
@@ -156,7 +157,7 @@ uint32_t deleteOldest(uint64_t spaceRequired)
 
     time_t oldestTime = 0;
     fileCount = 0;
-    while(file = root.openNextFile())
+    while((file = root.openNextFile()))
     {
       if(haveRTC)
         t = file.getLastWrite();
@@ -350,7 +351,7 @@ void handleSdCardDeleteAll() {
     if (haveSDCard) {
       File root, file;
       root = SD_MMC.open("/");
-      while(file = root.openNextFile()) {
+      while((file = root.openNextFile())) {
         String filename = file.name();
         if(SD_MMC.remove("/" + filename))
           DBG_OUTPUT_PORT.println("Deleted file: " + filename);

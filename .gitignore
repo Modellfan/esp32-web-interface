@@ -1,3 +1,6 @@
 .DS_Store
 .pio/
+.github/
+.vscode/*
+!.vscode/extensions.json
 platformio-local-override.ini
