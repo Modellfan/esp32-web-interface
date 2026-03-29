@@ -41,6 +41,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  */
+#ifndef CAN_TEST_ENV
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <WebServer.h>
@@ -473,7 +474,7 @@ static void handleCommand() {
   digitalWrite(LED_BUILTIN, HIGH);
 
   if (cmd == "json") {
-    if (!OICan::SendJson(server.client()))
+    if (!OICan::SendJson(server))
       server.send(500, "text/plain", "CAN communication error");
   }
   else if (cmd.startsWith("set")) {
@@ -562,7 +563,7 @@ static void handleCanMap() {
   }
 
   if (res == OICan::Ok)
-    OICan::SendCanMapping(server.client());
+    OICan::SendCanMapping(server);
   else if (res == OICan::CommError)
     server.send(500, "text/plain", "CAN communication error");
   else if (res == OICan::UnknownIndex)
@@ -927,3 +928,4 @@ void loop(void){
     }
   }
 }
+#endif

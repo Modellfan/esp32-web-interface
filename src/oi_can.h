@@ -19,7 +19,7 @@
  */
 #ifndef OI_CAN_H
 #define OI_CAN_H
-#include <WiFiClient.h>
+#include <WebServer.h>
 
 namespace OICan {
 enum SetResult { Ok, UnknownIndex, ValueOutOfRange, CommError };
@@ -27,8 +27,8 @@ enum BaudRate { Baud125k, Baud250k, Baud500k };
 
 void Init(uint8_t nodeId, BaudRate baud, int txPin, int rxPin);
 void Loop();
-bool SendJson(WiFiClient c);
-void SendCanMapping(WiFiClient c);
+bool SendJson(WebServer& server);
+void SendCanMapping(WebServer& server);
 SetResult AddCanMapping(String json);
 SetResult RemoveCanMapping(String json);
 SetResult SetValue(String name, double value);

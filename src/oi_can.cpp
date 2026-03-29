@@ -80,6 +80,65 @@ static int startupRetryCount = 0;
 constexpr uint32_t STARTUP_RETRY_INTERVAL_MS = 1000;
 constexpr int STARTUP_RETRY_LOG_INTERVAL = 20;
 
+static uint32_t baudRateToBitsPerSecond(BaudRate baud) {
+  switch (baud) {
+    case Baud125k:
+      return 125000;
+    case Baud250k:
+      return 250000;
+    case Baud500k:
+      return 500000;
+  }
+
+  return 0;
+}
+
+#ifdef DEBUG_CAN
+static void logCanFrame(const char* direction, const twai_message_t* frame) {
+  DBG_OUTPUT_PORT.printf("CAN %s id=0x%08" PRIX32 " dlc=%u%s%s data",
+                         direction,
+                         frame->identifier,
+                         frame->data_length_code,
+                         frame->extd ? " ext" : "",
+                         frame->rtr ? " rtr" : "");
+
+  if (!frame->rtr) {
+    for (uint8_t i = 0; i < frame->data_length_code && i < sizeof(frame->data); i++) {
+      DBG_OUTPUT_PORT.printf(" %02X", frame->data[i]);
+    }
+  }
+
+  DBG_OUTPUT_PORT.print("\r\n");
+}
+#endif
+
+static esp_err_t transmitFrame(const twai_message_t* frame, TickType_t timeoutTicks) {
+  esp_err_t result = twai_transmit(frame, timeoutTicks);
+
+#ifdef DEBUG_CAN
+  if (result == ESP_OK) {
+    logCanFrame("TX", frame);
+  }
+  else {
+    DBG_OUTPUT_PORT.printf("CAN TX failed err=%d id=0x%08" PRIX32 "\r\n", result, frame->identifier);
+  }
+#endif
+
+  return result;
+}
+
+static esp_err_t receiveFrame(twai_message_t* frame, TickType_t timeoutTicks) {
+  esp_err_t result = twai_receive(frame, timeoutTicks);
+
+#ifdef DEBUG_CAN
+  if (result == ESP_OK) {
+    logCanFrame("RX", frame);
+  }
+#endif
+
+  return result;
+}
+
 static void requestSdoElement(uint16_t index, uint8_t subIndex) {
   tx_frame.extd = false;
   tx_frame.identifier = 0x600 | _nodeId;
@@ -93,7 +152,7 @@ static void requestSdoElement(uint16_t index, uint8_t subIndex) {
   tx_frame.data[6] = 0;
   tx_frame.data[7] = 0;
 
-  twai_transmit(&tx_frame, pdMS_TO_TICKS(10));
+  transmitFrame(&tx_frame, pdMS_TO_TICKS(10));
 }
 
 static void setValueSdo(uint16_t index, uint8_t subIndex, uint32_t value) {
@@ -106,7 +165,7 @@ static void setValueSdo(uint16_t index, uint8_t subIndex, uint32_t value) {
   tx_frame.data[3] = subIndex;
   *(uint32_t*)&tx_frame.data[4] = value;
 
-  twai_transmit(&tx_frame, pdMS_TO_TICKS(10));
+  transmitFrame(&tx_frame, pdMS_TO_TICKS(10));
 }
 
 static int getId(String name) {
@@ -134,7 +193,7 @@ static void requestNextSegment(bool toggleBit) {
   tx_frame.data[6] = 0;
   tx_frame.data[7] = 0;
 
-  twai_transmit(&tx_frame, pdMS_TO_TICKS(10));
+  transmitFrame(&tx_frame, pdMS_TO_TICKS(10));
 }
 
 static void handleSdoResponse(twai_message_t *rxframe) {
@@ -239,7 +298,7 @@ static void handleUpdate(twai_message_t *rxframe) {
         tx_frame.data[3] = rxframe->data[7];
         updstate = SEND_SIZE;
         DBG_OUTPUT_PORT.printf("Sending ID %" PRIu32 "\r\n", *(uint32_t*)tx_frame.data);
-        twai_transmit(&tx_frame, pdMS_TO_TICKS(10));
+        transmitFrame(&tx_frame, pdMS_TO_TICKS(10));
 
         if (rxframe->data[1] < 1) //boot loader with timing quirk, wait 100 ms
           delay(100);
@@ -256,7 +315,7 @@ static void handleUpdate(twai_message_t *rxframe) {
         currentByte = 0;
         currentPage = 0;
         DBG_OUTPUT_PORT.printf("Sending size %u\r\n", tx_frame.data[0]);
-        twai_transmit(&tx_frame, pdMS_TO_TICKS(10));
+        transmitFrame(&tx_frame, pdMS_TO_TICKS(10));
       }
       break;
     case SEND_PAGE:
@@ -288,7 +347,7 @@ static void handleUpdate(twai_message_t *rxframe) {
         tx_frame.data[7] = buffer[7];
 
         updstate = SEND_PAGE;
-        twai_transmit(&tx_frame, pdMS_TO_TICKS(10));
+        transmitFrame(&tx_frame, pdMS_TO_TICKS(10));
       }
       else if (rxframe->data[0] == 'C') {
         tx_frame.identifier = 0x7dd;
@@ -299,7 +358,7 @@ static void handleUpdate(twai_message_t *rxframe) {
         tx_frame.data[3] = (crc >> 24) & 0xFF;
 
         updstate = CHECK_CRC;
-        twai_transmit(&tx_frame, pdMS_TO_TICKS(10));
+        transmitFrame(&tx_frame, pdMS_TO_TICKS(10));
       }
       break;
     case CHECK_CRC:
@@ -349,8 +408,13 @@ int GetCurrentUpdatePage() {
   return currentPage;
 }
 
-bool SendJson(WiFiClient client) {
-  if (state != IDLE) return false;
+bool SendJson(WebServer& server) {
+  if (state != IDLE) {
+#ifdef DEBUG_CAN
+    DBG_OUTPUT_PORT.printf("SendJson refused state=%d\r\n", state);
+#endif
+    return false;
+  }
 
   JsonDocument doc;
   twai_message_t rxframe;
@@ -369,30 +433,74 @@ bool SendJson(WiFiClient client) {
 
   JsonObject root = doc.as<JsonObject>();
   int failed = 0;
+  int succeeded = 0;
+  int requested = 0;
+
+  auto client = server.client();
 
   for (JsonPair kv : root) {
+    if (!client.connected()) {
+#ifdef DEBUG_CAN
+      DBG_OUTPUT_PORT.println("SendJson aborted client disconnected");
+#endif
+      return false;
+    }
+
     int id = kv.value()["id"].as<int>();
 
     if (id > 0) {
+      requested++;
       requestSdoElement(SDO_INDEX_PARAM_UID | (id >> 8), id & 0xff);
 
-      if (twai_receive(&rxframe, pdMS_TO_TICKS(10)) == ESP_OK && rxframe.data[3] == (id & 0xFF)) {
+      esp_err_t result = receiveFrame(&rxframe, pdMS_TO_TICKS(10));
+      if (result == ESP_OK &&
+          rxframe.identifier == (0x580 | _nodeId) &&
+          rxframe.data[0] != SDO_ABORT &&
+          (rxframe.data[1] | (rxframe.data[2] << 8)) == (SDO_INDEX_PARAM_UID | (id >> 8)) &&
+          rxframe.data[3] == (id & 0xFF)) {
         kv.value()["value"] = ((double)*(int32_t*)&rxframe.data[4]) / 32;
+        succeeded++;
       } else {
         failed++;
+#ifdef DEBUG_CAN
+        if (result == ESP_OK) {
+          DBG_OUTPUT_PORT.printf("SendJson miss param=0x%04X rxid=0x%08" PRIX32 " cmd=0x%02X idx=0x%04X sub=0x%02X\r\n",
+                                 id,
+                                 rxframe.identifier,
+                                 rxframe.data[0],
+                                 rxframe.data[1] | (rxframe.data[2] << 8),
+                                 rxframe.data[3]);
+        } else {
+          DBG_OUTPUT_PORT.printf("SendJson timeout param=0x%04X err=%d\r\n", id, result);
+        }
+#endif
       }
     }
   }
-  if (failed < 5) {
+
+  bool ok = succeeded > 0;
+
+#ifdef DEBUG_CAN
+  DBG_OUTPUT_PORT.printf("SendJson requested=%d ok=%d failed=%d result=%s\r\n",
+                         requested,
+                         succeeded,
+                         failed,
+                         ok ? "ok" : "fail");
+#endif
+
+  if (ok && client.connected()) {
+    server.setContentLength(measureJson(doc));
+    server.send(200, "application/json", "");
     WriteBufferingStream bufferedWifiClient{client, 1000};
     serializeJson(doc, bufferedWifiClient);
   }
-  return failed < 5;
+  return ok;
 }
 
-void SendCanMapping(WiFiClient client) {
+void SendCanMapping(WebServer& server) {
   enum ReqMapStt { START, COBID, DATAPOSLEN, GAINOFS, DONE };
 
+  auto client = server.client();
   twai_message_t rxframe;
   int index = SDO_INDEX_MAP_RD, subIndex = 0;
   int cobid = 0, pos = 0, len = 0, paramid = 0;
@@ -403,6 +511,13 @@ void SendCanMapping(WiFiClient client) {
   JsonDocument doc;
 
   while (DONE != reqMapStt) {
+    if (!client.connected()) {
+#ifdef DEBUG_CAN
+      DBG_OUTPUT_PORT.println("SendCanMapping aborted client disconnected");
+#endif
+      return;
+    }
+
     switch (reqMapStt) {
     case START:
       requestSdoElement(index, 0); //request COB ID
@@ -413,7 +528,7 @@ void SendCanMapping(WiFiClient client) {
       paramid = 0;
       break;
     case COBID:
-      if (twai_receive(&rxframe, pdMS_TO_TICKS(10)) == ESP_OK) {
+      if (receiveFrame(&rxframe, pdMS_TO_TICKS(10)) == ESP_OK) {
         if (rxframe.data[0] != SDO_ABORT) {
           cobid = *(int32_t*)&rxframe.data[4]; //convert bytes to word
           subIndex++;
@@ -433,7 +548,7 @@ void SendCanMapping(WiFiClient client) {
         reqMapStt = DONE; //don't lock up when not receiving
       break;
     case DATAPOSLEN:
-      if (twai_receive(&rxframe, pdMS_TO_TICKS(10)) == ESP_OK) {
+      if (receiveFrame(&rxframe, pdMS_TO_TICKS(10)) == ESP_OK) {
         if (rxframe.data[0] != SDO_ABORT) {
           paramid = *(uint16_t*)&rxframe.data[4];
           pos = rxframe.data[6];
@@ -453,7 +568,7 @@ void SendCanMapping(WiFiClient client) {
         reqMapStt = DONE; //don't lock up when not receiving
       break;
     case GAINOFS:
-      if (twai_receive(&rxframe, pdMS_TO_TICKS(10)) == ESP_OK) {
+      if (receiveFrame(&rxframe, pdMS_TO_TICKS(10)) == ESP_OK) {
         if (rxframe.data[0] != SDO_ABORT) {
           int32_t gainFixedPoint = ((*(uint32_t*)&rxframe.data[4]) & 0xFFFFFF) << (32-24);
           gainFixedPoint >>= (32-24);
@@ -493,8 +608,12 @@ void SendCanMapping(WiFiClient client) {
     }
   }
 
-  WriteBufferingStream bufferedWifiClient{client, 1000};
-  serializeJson(doc, bufferedWifiClient);
+  if (client.connected()) {
+    server.setContentLength(measureJson(doc));
+    server.send(200, "application/json", "");
+    WriteBufferingStream bufferedWifiClient{client, 1000};
+    serializeJson(doc, bufferedWifiClient);
+  }
 }
 
 SetResult AddCanMapping(String json) {
@@ -515,14 +634,14 @@ SetResult AddCanMapping(String json) {
 
   setValueSdo(index, 0, (uint32_t)doc["id"]); //Send CAN Id
 
-  if (twai_receive(&rxframe, pdMS_TO_TICKS(10)) == ESP_OK) {
+  if (receiveFrame(&rxframe, pdMS_TO_TICKS(10)) == ESP_OK) {
     DBG_OUTPUT_PORT.println("Sent COB Id");
     setValueSdo(index, 1, doc["paramid"].as<uint32_t>() | (doc["position"].as<uint32_t>() << 16) | (doc["length"].as<int32_t>() << 24)); //data item, position and length
-    if (rxframe.data[0] != SDO_ABORT && twai_receive(&rxframe, pdMS_TO_TICKS(10)) == ESP_OK) {
+    if (rxframe.data[0] != SDO_ABORT && receiveFrame(&rxframe, pdMS_TO_TICKS(10)) == ESP_OK) {
       DBG_OUTPUT_PORT.println("Sent position and length");
       setValueSdo(index, 2, (uint32_t)((int32_t)(doc["gain"].as<double>() * 1000) & 0xFFFFFF) | doc["offset"].as<int32_t>() << 24); //gain and offset
 
-      if (rxframe.data[0] != SDO_ABORT && twai_receive(&rxframe, pdMS_TO_TICKS(10)) == ESP_OK) {
+      if (rxframe.data[0] != SDO_ABORT && receiveFrame(&rxframe, pdMS_TO_TICKS(10)) == ESP_OK) {
         if (rxframe.data[0] != SDO_ABORT){
           DBG_OUTPUT_PORT.println("Sent gain and offset -> map successful");
           return Ok;
@@ -552,7 +671,7 @@ SetResult RemoveCanMapping(String json){
 
   setValueSdo(doc["index"].as<uint32_t>(), doc["subindex"].as<uint8_t>(), 0U); //Writing 0 to map index removes the mapping
 
-  if (twai_receive(&rxframe, pdMS_TO_TICKS(10)) == ESP_OK) {
+  if (receiveFrame(&rxframe, pdMS_TO_TICKS(10)) == ESP_OK) {
     if (rxframe.data[0] != SDO_ABORT){
       DBG_OUTPUT_PORT.println("Item removed");
       return Ok;
@@ -575,7 +694,7 @@ SetResult SetValue(String name, double value) {
 
   setValueSdo(SDO_INDEX_PARAM_UID | (id >> 8), id & 0xFF, (uint32_t)(value * 32));
 
-  if (twai_receive(&rxframe, pdMS_TO_TICKS(10)) == ESP_OK) {
+  if (receiveFrame(&rxframe, pdMS_TO_TICKS(10)) == ESP_OK) {
     if (rxframe.data[0] == SDO_RESPONSE_DOWNLOAD)
       return Ok;
     else if (*(uint32_t*)&rxframe.data[4] == SDO_ERR_RANGE)
@@ -595,7 +714,7 @@ bool SaveToFlash() {
 
   setValueSdo(SDO_INDEX_COMMANDS, SDO_CMD_SAVE, 0U);
 
-  if (twai_receive(&rxframe, pdMS_TO_TICKS(200)) == ESP_OK && rxframe.data[0] == SDO_WRITE_REPLY) {
+  if (receiveFrame(&rxframe, pdMS_TO_TICKS(200)) == ESP_OK && rxframe.data[0] == SDO_WRITE_REPLY) {
     return true;
   }
   else {
@@ -612,7 +731,7 @@ bool StartStop(int opmode)
 
   setValueSdo(SDO_INDEX_COMMANDS, subIdx, opmode);
 
-  if (twai_receive(&rxframe, pdMS_TO_TICKS(200)) == ESP_OK && rxframe.data[0] == SDO_WRITE_REPLY) {
+  if (receiveFrame(&rxframe, pdMS_TO_TICKS(200)) == ESP_OK && rxframe.data[0] == SDO_WRITE_REPLY) {
     return true;
   }
   else {
@@ -643,7 +762,7 @@ String StreamValues(String names, int samples) {
       int id = ids[item];
       requestSdoElement(SDO_INDEX_PARAM_UID | (id >> 8), id & 0xFF);
 
-      if (twai_receive(&rxframe, pdMS_TO_TICKS(10)) == ESP_OK) {
+      if (receiveFrame(&rxframe, pdMS_TO_TICKS(10)) == ESP_OK) {
         if (item > 0) result += ",";
         if (rxframe.data[0] == 0x80)
           result += "0";
@@ -672,7 +791,7 @@ double GetValue(String name) {
 
   requestSdoElement(SDO_INDEX_PARAM_UID | (id >> 8), id & 0xFF);
 
-  if (twai_receive(&rxframe, pdMS_TO_TICKS(10)) == ESP_OK) {
+  if (receiveFrame(&rxframe, pdMS_TO_TICKS(10)) == ESP_OK) {
     if (rxframe.data[0] == 0x80)
       return 0;
     else
@@ -712,6 +831,7 @@ void Init(uint8_t nodeId, BaudRate baud, int txPin, int rxPin) {
 
   twai_timing_config_t t_config;
   baudRate = baud;
+  const uint32_t baudBitsPerSecond = baudRateToBitsPerSecond(baud);
 
   switch (baud)
   {
@@ -731,9 +851,9 @@ void Init(uint8_t nodeId, BaudRate baud, int txPin, int rxPin) {
                                    .single_filter = false};
 
   if (twai_driver_install(&g_config, &t_config, &f_config) == ESP_OK) {
-     printf("Driver installed\n");
+     DBG_OUTPUT_PORT.printf("Driver installed tx=%d rx=%d baud=%" PRIu32 "\r\n", txPin, rxPin, baudBitsPerSecond);
   } else {
-     printf("Failed to install driver\n");
+     DBG_OUTPUT_PORT.printf("Failed to install driver tx=%d rx=%d baud=%" PRIu32 "\r\n", txPin, rxPin, baudBitsPerSecond);
      return;
   }
 
@@ -757,7 +877,7 @@ void Loop() {
   bool recvdResponse = false;
   twai_message_t rxframe;
 
-  if (twai_receive(&rxframe, 0) == ESP_OK) {
+  if (receiveFrame(&rxframe, 0) == ESP_OK) {
     if (rxframe.identifier == (0x580 | _nodeId)) {
       handleSdoResponse(&rxframe);
       recvdResponse = true;

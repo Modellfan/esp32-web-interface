@@ -23,18 +23,19 @@ var ui = {
     // The API endpoint to query to get firmware release available in Github
 	githubFirmwareReleaseURL: 'https://api.github.com/repos/jsphuebner/stm32-sine/releases',
 
-  //Handle for auto refresh interval
+	//Handle for auto refresh interval
   autoRefreshHandle: 0,
+  refreshPending: false,
 
 	// temp variable to store updates from Parameter Database
 	paramUpdates: "",
+	webVersion: "2.2.2",
 
 	// Status of visibility of parameter categories. E.g. Motor, Inverter. true = visible, false = not visible.
 	categoryVisible: {},
 
 	navbarIsBig: true,
 	activePage: "dashboard",
-	spotValueStorageKey: "spotValueSelections",
 
   shrinkNavbar: function() {
 		document.getElementById("navbar").style.width = "60px";
@@ -152,6 +153,10 @@ var ui = {
 	/** @brief automatically update data on the UI */
 	refresh: function()
 	{
+		if (ui.refreshPending) {
+			return;
+		}
+
 		if (ui.activePage === "spotvalues") {
 			ui.refreshSpotValues();
 		}
@@ -213,6 +218,7 @@ var ui = {
 		}
 
 		document.getElementById("spinner-div").style.visibility = "visible";
+		ui.refreshPending = true;
 
 		inverter.getParamList(function(values)
 		{
@@ -220,6 +226,8 @@ var ui = {
 			var tableSpot = document.getElementById("spotValues");
 			var lastCategory = "";
 			var params = {};
+			var spotValueGroups = {};
+			var spotValueGroupOrder = [];
 
 			while (tableParam.rows.length > 1) tableParam.deleteRow(1);
 			while (tableSpot.rows.length > 1) tableSpot.deleteRow(1);
@@ -300,8 +308,13 @@ var ui = {
 				}
 				else
 				{
-					var checkHtml = '<INPUT type="checkbox" data-name="' + name + '" data-axis="left" /> l';
-					checkHtml += ' <INPUT type="checkbox" data-name="' + name + '" data-axis="right" /> r';
+					var separatorIndex = name.indexOf('_');
+					var spotCategory = separatorIndex > 0 ? name.substring(0, separatorIndex) : "General";
+					var spotName = separatorIndex > 0 ? name.substring(separatorIndex + 1) : name;
+					if (!spotValueGroups[spotCategory]) {
+						spotValueGroups[spotCategory] = [];
+						spotValueGroupOrder.push(spotCategory);
+					}
 					var unit = param.unit;
 
 					if (param.enums)
@@ -327,19 +340,46 @@ var ui = {
 						display = param.value;
 					}
 
-					var isSelected = ui.isSpotValueSelected(name);
-					var checkboxHtml = '<INPUT type="checkbox" class="spot-value-toggle" data-name="' + name +
-						'" onchange="ui.toggleSpotValueSelection(this)"' + (isSelected ? ' checked' : '') + ' />';
-					var spotRow = ui.addRow(tableSpot, [ checkboxHtml, nameWithTooltip, display, unit ], true);
-					spotRow.dataset.spotValue = name;
+					var spotNameWithTooltip = nameWithTooltip;
+					if (spotNameWithTooltip === name) {
+						spotNameWithTooltip = spotName;
+					} else {
+						spotNameWithTooltip = "<div class=\"tooltip\">" + spotName + "<span class=\"tooltiptext\">" + docstring + "</span></div>";
+					}
+
+					spotValueGroups[spotCategory].push({
+						name: name,
+						displayName: spotNameWithTooltip,
+						displayValue: display,
+						unit: unit
+					});
 				}
 			}
+
+			for (var groupIdx = 0; groupIdx < spotValueGroupOrder.length; groupIdx++)
+			{
+				var groupName = spotValueGroupOrder[groupIdx];
+				ui.addRow(tableSpot, [ "<span style=\"font-weight: bold; display: inline-block; padding-left: 0.75rem;\">- " + groupName + "</span>" ], true);
+
+				for (var itemIdx = 0; itemIdx < spotValueGroups[groupName].length; itemIdx++)
+				{
+					var spotValue = spotValueGroups[groupName][itemIdx];
+					var spotRow = ui.addRow(tableSpot, [ spotValue.displayName, spotValue.displayValue, spotValue.unit ], true);
+					spotRow.dataset.spotValue = spotValue.name;
+				}
+			}
+
       ui.populateVersion();
       ui.populateSpotValueDropDown();
 
 			document.getElementById("paramDownload").href = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(params, null, 2));
 			document.getElementById("spinner-div").style.visibility = "hidden";
+			ui.refreshPending = false;
 		});
+
+		if (!inverter.paramListRequestPending) {
+			ui.refreshPending = false;
+		}
 	},
 
 	/** @brief Adds row to a table
@@ -362,63 +402,13 @@ var ui = {
 		return tr;
 	},
 
-	getSpotValueSelections: function()
-	{
-		try {
-			var raw = localStorage.getItem(ui.spotValueStorageKey);
-			return raw ? JSON.parse(raw) : {};
-		} catch (e) {
-			return {};
-		}
-	},
-
-	setSpotValueSelections: function(selections)
-	{
-		try {
-			localStorage.setItem(ui.spotValueStorageKey, JSON.stringify(selections));
-		} catch (e) {}
-	},
-
-	isSpotValueSelected: function(name)
-	{
-		var selections = ui.getSpotValueSelections();
-		if (name in selections) {
-			return selections[name];
-		}
-		return true;
-	},
-
-	setSpotValueSelection: function(name, selected)
-	{
-		var selections = ui.getSpotValueSelections();
-		selections[name] = selected;
-		ui.setSpotValueSelections(selections);
-	},
-
-	toggleSpotValueSelection: function(checkbox)
-	{
-		var name = checkbox.dataset.name;
-		ui.setSpotValueSelection(name, checkbox.checked);
-		var row = checkbox.closest("tr");
-		if (row && row.cells.length > 2) {
-			if (!checkbox.checked) {
-				row.cells[2].textContent = "-";
-			}
-			else {
-				ui.refreshSpotValues();
-			}
-		}
-	},
-
 	getSelectedSpotValueNames: function()
 	{
 		var selected = [];
-		var checkboxes = document.querySelectorAll('#spotBody .spot-value-toggle');
-		for (var i = 0; i < checkboxes.length; i++)
+		var rows = document.querySelectorAll('#spotBody tr[data-spot-value]');
+		for (var i = 0; i < rows.length; i++)
 		{
-			if (checkboxes[i].checked) {
-				selected.push(checkboxes[i].dataset.name);
-			}
+			selected.push(rows[i].dataset.spotValue);
 		}
 		return selected;
 	},
@@ -447,8 +437,8 @@ var ui = {
 					displayValue = entry.enums[displayValue];
 				}
 				var row = document.querySelector('#spotBody tr[data-spot-value="' + name + '"]');
-				if (row && row.cells.length > 2) {
-					row.cells[2].textContent = displayValue;
+				if (row && row.cells.length > 1) {
+					row.cells[1].textContent = displayValue;
 				}
 			}
 		});
@@ -461,7 +451,7 @@ var ui = {
 		versionDiv.innerHTML = "";
 		var firmwareVersion = String(paramsCache.get('version'));
 		versionDiv.innerHTML += "firmware : " + firmwareVersion + "<br>";
-		versionDiv.innerHTML += "web : v2.2"
+		versionDiv.innerHTML += "web : v" + ui.webVersion;
 	},
 
 	/** @brief If beta features are visible, hide them. If hidden, show them. */
