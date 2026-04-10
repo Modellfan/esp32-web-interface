@@ -4,7 +4,7 @@ Config::Config() {
 }
 
 void Config::load() {
-
+    bool updated = false;
     EEPROM.begin(sizeof(settings));
     EEPROM.get(0, settings);
     if (settings.version != EEPROM_VERSION) {
@@ -15,14 +15,21 @@ void Config::load() {
         settings.canEnablePin = 0;
         settings.nodeId = 1;
         settings.canSpeed = 2;
+        updated = true;
     }
 
     if (settings.nodeId < 1 || settings.nodeId > 63) {
         settings.nodeId = 1;
+        updated = true;
     }
 
     if (settings.canSpeed < 0 || settings.canSpeed > 2) {
         settings.canSpeed = 2;
+        updated = true;
+    }
+
+    if (updated) {
+        saveSettings();
     }
 }
 int Config::getCanRXPin() {

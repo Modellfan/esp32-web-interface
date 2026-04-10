@@ -29,7 +29,7 @@ var ui = {
 
 	// temp variable to store updates from Parameter Database
 	paramUpdates: "",
-	webVersion: "2.2.4",
+	webVersion: "2.2.5",
 
 	// Status of visibility of parameter categories. E.g. Motor, Inverter. true = visible, false = not visible.
 	categoryVisible: {},
@@ -138,6 +138,7 @@ var ui = {
 			}
 		});
 
+		ui.getNodeId();
 		ui.updateTables();
 		plot.generateChart();
 		ui.parameterDatabaseCheckForUpdates();
@@ -146,7 +147,6 @@ var ui = {
 		settings.populateSettingsTab();
 		ui.populateFileList();
 		ui.refreshStatusBox();
-		ui.getNodeId();
 		ui.setAutoReload(true);
 	},
 
@@ -171,8 +171,7 @@ var ui = {
 
     xmlhttp.onload = function()
     {
-        document.getElementById("nodeid").value = this.responseText.split(',')[0];
-        document.getElementById("canspeed").value = this.responseText.split(',')[1];
+        ui.applyNodeIdAndSpeedResponse(this.responseText);
     }
 
     xmlhttp.open("GET", "/nodeid", true);
@@ -184,13 +183,30 @@ var ui = {
 
     xmlhttp.onload = function()
     {
-        document.getElementById("nodeid").value = this.responseText.split(',')[0];
-        document.getElementById("canspeed").value = this.responseText.split(',')[1];
+        ui.applyNodeIdAndSpeedResponse(this.responseText);
     }
 
     xmlhttp.open("GET", "/nodeid?id=" + document.getElementById("nodeid").value + "&canspeed=" + document.getElementById("canspeed").value, true);
     xmlhttp.send();
   },
+
+	applyNodeIdAndSpeedResponse: function(responseText) {
+		var parts = responseText.split(',');
+		if (parts.length < 2) {
+			return;
+		}
+
+		var nodeId = parseInt(parts[0], 10);
+		var canSpeed = parseInt(parts[1], 10);
+
+		if (!isNaN(nodeId)) {
+			document.getElementById("nodeid").value = nodeId;
+		}
+
+		if (!isNaN(canSpeed) && canSpeed >= 0 && canSpeed <= 2) {
+			document.getElementById("canspeed").value = canSpeed;
+		}
+	},
 
 	/** @brief send arbitrary command to inverter and print result
 	 * @param cmd command string to be sent */
