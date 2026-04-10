@@ -29,7 +29,7 @@ var ui = {
 
 	// temp variable to store updates from Parameter Database
 	paramUpdates: "",
-	webVersion: "2.2.2",
+	webVersion: "2.2.4",
 
 	// Status of visibility of parameter categories. E.g. Motor, Inverter. true = visible, false = not visible.
 	categoryVisible: {},
@@ -359,12 +359,12 @@ var ui = {
 			for (var groupIdx = 0; groupIdx < spotValueGroupOrder.length; groupIdx++)
 			{
 				var groupName = spotValueGroupOrder[groupIdx];
-				ui.addRow(tableSpot, [ "<span style=\"font-weight: bold; display: inline-block; padding-left: 0.75rem;\">- " + groupName + "</span>" ], true);
+				ui.addRow(tableSpot, [ "<BUTTON style=\"background: none; border: none; font-weight: bold;\">- " + groupName + "</BUTTON>" ], true);
 
 				for (var itemIdx = 0; itemIdx < spotValueGroups[groupName].length; itemIdx++)
 				{
 					var spotValue = spotValueGroups[groupName][itemIdx];
-					var spotRow = ui.addRow(tableSpot, [ spotValue.displayName, spotValue.displayValue, spotValue.unit ], true);
+					var spotRow = ui.addRow(tableSpot, [ "", spotValue.displayName, spotValue.displayValue, spotValue.unit ], true);
 					spotRow.dataset.spotValue = spotValue.name;
 				}
 			}
@@ -437,8 +437,8 @@ var ui = {
 					displayValue = entry.enums[displayValue];
 				}
 				var row = document.querySelector('#spotBody tr[data-spot-value="' + name + '"]');
-				if (row && row.cells.length > 1) {
-					row.cells[1].textContent = displayValue;
+				if (row && row.cells.length > 2) {
+					row.cells[2].textContent = displayValue;
 				}
 			}
 		});

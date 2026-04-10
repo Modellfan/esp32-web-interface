@@ -21,7 +21,6 @@
 #include "driver/twai.h"
 #include <FS.h>
 #include <SPIFFS.h>
-#include <StreamUtils.h>
 #include <ArduinoJson.h>
 #include "oi_can.h"
 
@@ -491,8 +490,7 @@ bool SendJson(WebServer& server) {
   if (ok && client.connected()) {
     server.setContentLength(measureJson(doc));
     server.send(200, "application/json", "");
-    WriteBufferingStream bufferedWifiClient{client, 1000};
-    serializeJson(doc, bufferedWifiClient);
+    serializeJson(doc, client);
   }
   return ok;
 }
@@ -611,8 +609,7 @@ void SendCanMapping(WebServer& server) {
   if (client.connected()) {
     server.setContentLength(measureJson(doc));
     server.send(200, "application/json", "");
-    WriteBufferingStream bufferedWifiClient{client, 1000};
-    serializeJson(doc, bufferedWifiClient);
+    serializeJson(doc, client);
   }
 }
 
