@@ -29,7 +29,7 @@ var ui = {
 
 	// temp variable to store updates from Parameter Database
 	paramUpdates: "",
-	webVersion: "2.2.5",
+	webVersion: "2.2.6",
 
 	// Status of visibility of parameter categories. E.g. Motor, Inverter. true = visible, false = not visible.
 	categoryVisible: {},

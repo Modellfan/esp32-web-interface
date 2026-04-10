@@ -138,6 +138,68 @@ static esp_err_t receiveFrame(twai_message_t* frame, TickType_t timeoutTicks) {
   return result;
 }
 
+constexpr TickType_t SDO_READ_TIMEOUT_TICKS = pdMS_TO_TICKS(20);
+constexpr TickType_t SDO_WRITE_TIMEOUT_TICKS = pdMS_TO_TICKS(100);
+
+static void drainReceiveQueue() {
+  twai_message_t frame;
+
+  while (receiveFrame(&frame, 0) == ESP_OK) {
+#ifdef DEBUG_CAN
+    DBG_OUTPUT_PORT.printf("Discarded queued CAN frame id=0x%08" PRIX32 "\r\n", frame.identifier);
+#endif
+  }
+}
+
+static bool isExpectedSdoReply(const twai_message_t* frame, uint16_t index, uint8_t subIndex, uint8_t expectedCommand) {
+  if (frame->identifier != (0x580 | _nodeId)) {
+    return false;
+  }
+
+  if ((frame->data[1] | (frame->data[2] << 8)) != index || frame->data[3] != subIndex) {
+    return false;
+  }
+
+  if (frame->data[0] == SDO_ABORT) {
+    return true;
+  }
+
+  return frame->data[0] == expectedCommand;
+}
+
+static bool waitForSdoReply(twai_message_t* frame, uint16_t index, uint8_t subIndex, uint8_t expectedCommand, TickType_t timeoutTicks) {
+  TickType_t startTicks = xTaskGetTickCount();
+
+  while ((xTaskGetTickCount() - startTicks) < timeoutTicks) {
+    TickType_t elapsedTicks = xTaskGetTickCount() - startTicks;
+    TickType_t remainingTicks = timeoutTicks - elapsedTicks;
+    if (remainingTicks == 0) {
+      break;
+    }
+
+    if (receiveFrame(frame, remainingTicks) != ESP_OK) {
+      return false;
+    }
+
+    if (isExpectedSdoReply(frame, index, subIndex, expectedCommand)) {
+      return true;
+    }
+
+#ifdef DEBUG_CAN
+    DBG_OUTPUT_PORT.printf("Ignoring unexpected CAN reply id=0x%08" PRIX32 " idx=0x%04X sub=0x%02X cmd=0x%02X while waiting for idx=0x%04X sub=0x%02X cmd=0x%02X\r\n",
+                           frame->identifier,
+                           frame->data[1] | (frame->data[2] << 8),
+                           frame->data[3],
+                           frame->data[0],
+                           index,
+                           subIndex,
+                           expectedCommand);
+#endif
+  }
+
+  return false;
+}
+
 static void requestSdoElement(uint16_t index, uint8_t subIndex) {
   tx_frame.extd = false;
   tx_frame.identifier = 0x600 | _nodeId;
@@ -436,6 +498,7 @@ bool SendJson(WebServer& server) {
   int requested = 0;
 
   auto client = server.client();
+  drainReceiveQueue();
 
   for (JsonPair kv : root) {
     if (!client.connected()) {
@@ -449,29 +512,18 @@ bool SendJson(WebServer& server) {
 
     if (id > 0) {
       requested++;
-      requestSdoElement(SDO_INDEX_PARAM_UID | (id >> 8), id & 0xff);
+      const uint16_t index = SDO_INDEX_PARAM_UID | (id >> 8);
+      const uint8_t subIndex = id & 0xFF;
+      requestSdoElement(index, subIndex);
 
-      esp_err_t result = receiveFrame(&rxframe, pdMS_TO_TICKS(10));
-      if (result == ESP_OK &&
-          rxframe.identifier == (0x580 | _nodeId) &&
-          rxframe.data[0] != SDO_ABORT &&
-          (rxframe.data[1] | (rxframe.data[2] << 8)) == (SDO_INDEX_PARAM_UID | (id >> 8)) &&
-          rxframe.data[3] == (id & 0xFF)) {
+      if (waitForSdoReply(&rxframe, index, subIndex, SDO_READ_REPLY, SDO_READ_TIMEOUT_TICKS) &&
+          rxframe.data[0] != SDO_ABORT) {
         kv.value()["value"] = ((double)*(int32_t*)&rxframe.data[4]) / 32;
         succeeded++;
       } else {
         failed++;
 #ifdef DEBUG_CAN
-        if (result == ESP_OK) {
-          DBG_OUTPUT_PORT.printf("SendJson miss param=0x%04X rxid=0x%08" PRIX32 " cmd=0x%02X idx=0x%04X sub=0x%02X\r\n",
-                                 id,
-                                 rxframe.identifier,
-                                 rxframe.data[0],
-                                 rxframe.data[1] | (rxframe.data[2] << 8),
-                                 rxframe.data[3]);
-        } else {
-          DBG_OUTPUT_PORT.printf("SendJson timeout param=0x%04X err=%d\r\n", id, result);
-        }
+        DBG_OUTPUT_PORT.printf("SendJson miss param=0x%04X\r\n", id);
 #endif
       }
     }
@@ -507,6 +559,7 @@ void SendCanMapping(WebServer& server) {
   ReqMapStt reqMapStt = START;
 
   JsonDocument doc;
+  drainReceiveQueue();
 
   while (DONE != reqMapStt) {
     if (!client.connected()) {
@@ -526,7 +579,7 @@ void SendCanMapping(WebServer& server) {
       paramid = 0;
       break;
     case COBID:
-      if (receiveFrame(&rxframe, pdMS_TO_TICKS(10)) == ESP_OK) {
+      if (waitForSdoReply(&rxframe, index, 0, SDO_READ_REPLY, SDO_READ_TIMEOUT_TICKS)) {
         if (rxframe.data[0] != SDO_ABORT) {
           cobid = *(int32_t*)&rxframe.data[4]; //convert bytes to word
           subIndex++;
@@ -546,7 +599,7 @@ void SendCanMapping(WebServer& server) {
         reqMapStt = DONE; //don't lock up when not receiving
       break;
     case DATAPOSLEN:
-      if (receiveFrame(&rxframe, pdMS_TO_TICKS(10)) == ESP_OK) {
+      if (waitForSdoReply(&rxframe, index, subIndex, SDO_READ_REPLY, SDO_READ_TIMEOUT_TICKS)) {
         if (rxframe.data[0] != SDO_ABORT) {
           paramid = *(uint16_t*)&rxframe.data[4];
           pos = rxframe.data[6];
@@ -566,7 +619,7 @@ void SendCanMapping(WebServer& server) {
         reqMapStt = DONE; //don't lock up when not receiving
       break;
     case GAINOFS:
-      if (receiveFrame(&rxframe, pdMS_TO_TICKS(10)) == ESP_OK) {
+      if (waitForSdoReply(&rxframe, index, subIndex, SDO_READ_REPLY, SDO_READ_TIMEOUT_TICKS)) {
         if (rxframe.data[0] != SDO_ABORT) {
           int32_t gainFixedPoint = ((*(uint32_t*)&rxframe.data[4]) & 0xFFFFFF) << (32-24);
           gainFixedPoint >>= (32-24);
@@ -628,17 +681,18 @@ SetResult AddCanMapping(String json) {
   }
 
   int index = doc["isrx"] ? SDO_INDEX_MAP_RX : SDO_INDEX_MAP_TX;
+  drainReceiveQueue();
 
   setValueSdo(index, 0, (uint32_t)doc["id"]); //Send CAN Id
 
-  if (receiveFrame(&rxframe, pdMS_TO_TICKS(10)) == ESP_OK) {
+  if (waitForSdoReply(&rxframe, index, 0, SDO_WRITE_REPLY, SDO_WRITE_TIMEOUT_TICKS)) {
     DBG_OUTPUT_PORT.println("Sent COB Id");
     setValueSdo(index, 1, doc["paramid"].as<uint32_t>() | (doc["position"].as<uint32_t>() << 16) | (doc["length"].as<int32_t>() << 24)); //data item, position and length
-    if (rxframe.data[0] != SDO_ABORT && receiveFrame(&rxframe, pdMS_TO_TICKS(10)) == ESP_OK) {
+    if (rxframe.data[0] != SDO_ABORT && waitForSdoReply(&rxframe, index, 1, SDO_WRITE_REPLY, SDO_WRITE_TIMEOUT_TICKS)) {
       DBG_OUTPUT_PORT.println("Sent position and length");
       setValueSdo(index, 2, (uint32_t)((int32_t)(doc["gain"].as<double>() * 1000) & 0xFFFFFF) | doc["offset"].as<int32_t>() << 24); //gain and offset
 
-      if (rxframe.data[0] != SDO_ABORT && receiveFrame(&rxframe, pdMS_TO_TICKS(10)) == ESP_OK) {
+      if (rxframe.data[0] != SDO_ABORT && waitForSdoReply(&rxframe, index, 2, SDO_WRITE_REPLY, SDO_WRITE_TIMEOUT_TICKS)) {
         if (rxframe.data[0] != SDO_ABORT){
           DBG_OUTPUT_PORT.println("Sent gain and offset -> map successful");
           return Ok;
@@ -666,9 +720,12 @@ SetResult RemoveCanMapping(String json){
     return UnknownIndex;
   }
 
-  setValueSdo(doc["index"].as<uint32_t>(), doc["subindex"].as<uint8_t>(), 0U); //Writing 0 to map index removes the mapping
+  const uint16_t index = doc["index"].as<uint32_t>();
+  const uint8_t subIndex = doc["subindex"].as<uint8_t>();
+  drainReceiveQueue();
+  setValueSdo(index, subIndex, 0U); //Writing 0 to map index removes the mapping
 
-  if (receiveFrame(&rxframe, pdMS_TO_TICKS(10)) == ESP_OK) {
+  if (waitForSdoReply(&rxframe, index, subIndex, SDO_WRITE_REPLY, SDO_WRITE_TIMEOUT_TICKS)) {
     if (rxframe.data[0] != SDO_ABORT){
       DBG_OUTPUT_PORT.println("Item removed");
       return Ok;
@@ -688,10 +745,13 @@ SetResult SetValue(String name, double value) {
   twai_message_t rxframe;
 
   int id = getId(name);
+  const uint16_t index = SDO_INDEX_PARAM_UID | (id >> 8);
+  const uint8_t subIndex = id & 0xFF;
 
-  setValueSdo(SDO_INDEX_PARAM_UID | (id >> 8), id & 0xFF, (uint32_t)(value * 32));
+  drainReceiveQueue();
+  setValueSdo(index, subIndex, (uint32_t)(value * 32));
 
-  if (receiveFrame(&rxframe, pdMS_TO_TICKS(10)) == ESP_OK) {
+  if (waitForSdoReply(&rxframe, index, subIndex, SDO_WRITE_REPLY, SDO_WRITE_TIMEOUT_TICKS)) {
     if (rxframe.data[0] == SDO_RESPONSE_DOWNLOAD)
       return Ok;
     else if (*(uint32_t*)&rxframe.data[4] == SDO_ERR_RANGE)
@@ -709,9 +769,11 @@ bool SaveToFlash() {
 
   twai_message_t rxframe;
 
+  drainReceiveQueue();
   setValueSdo(SDO_INDEX_COMMANDS, SDO_CMD_SAVE, 0U);
 
-  if (receiveFrame(&rxframe, pdMS_TO_TICKS(200)) == ESP_OK && rxframe.data[0] == SDO_WRITE_REPLY) {
+  if (waitForSdoReply(&rxframe, SDO_INDEX_COMMANDS, SDO_CMD_SAVE, SDO_WRITE_REPLY, pdMS_TO_TICKS(200)) &&
+      rxframe.data[0] == SDO_WRITE_REPLY) {
     return true;
   }
   else {
@@ -726,9 +788,11 @@ bool StartStop(int opmode)
   twai_message_t rxframe;
   uint8_t subIdx = opmode == 0 ? SDO_CMD_STOP : SDO_CMD_START;
 
+  drainReceiveQueue();
   setValueSdo(SDO_INDEX_COMMANDS, subIdx, opmode);
 
-  if (receiveFrame(&rxframe, pdMS_TO_TICKS(200)) == ESP_OK && rxframe.data[0] == SDO_WRITE_REPLY) {
+  if (waitForSdoReply(&rxframe, SDO_INDEX_COMMANDS, subIdx, SDO_WRITE_REPLY, pdMS_TO_TICKS(200)) &&
+      rxframe.data[0] == SDO_WRITE_REPLY) {
     return true;
   }
   else {
@@ -748,6 +812,7 @@ String StreamValues(String names, int samples) {
 
   int ids[30], numItems = 0;
   String result;
+  drainReceiveQueue();
 
   for (int pos = 0; pos >= 0; pos = names.indexOf(',', pos + 1)) {
     String name = names.substring(pos + 1, names.indexOf(',', pos + 1));
@@ -757,9 +822,11 @@ String StreamValues(String names, int samples) {
   for (int i = 0; i < samples; i++) {
     for (int item = 0; item < numItems; item++) {
       int id = ids[item];
-      requestSdoElement(SDO_INDEX_PARAM_UID | (id >> 8), id & 0xFF);
+      const uint16_t index = SDO_INDEX_PARAM_UID | (id >> 8);
+      const uint8_t subIndex = id & 0xFF;
+      requestSdoElement(index, subIndex);
 
-      if (receiveFrame(&rxframe, pdMS_TO_TICKS(10)) == ESP_OK) {
+      if (waitForSdoReply(&rxframe, index, subIndex, SDO_READ_REPLY, SDO_READ_TIMEOUT_TICKS)) {
         if (item > 0) result += ",";
         if (rxframe.data[0] == 0x80)
           result += "0";
@@ -785,10 +852,13 @@ double GetValue(String name) {
   twai_message_t rxframe;
 
   int id = getId(name);
+  const uint16_t index = SDO_INDEX_PARAM_UID | (id >> 8);
+  const uint8_t subIndex = id & 0xFF;
 
-  requestSdoElement(SDO_INDEX_PARAM_UID | (id >> 8), id & 0xFF);
+  drainReceiveQueue();
+  requestSdoElement(index, subIndex);
 
-  if (receiveFrame(&rxframe, pdMS_TO_TICKS(10)) == ESP_OK) {
+  if (waitForSdoReply(&rxframe, index, subIndex, SDO_READ_REPLY, SDO_READ_TIMEOUT_TICKS)) {
     if (rxframe.data[0] == 0x80)
       return 0;
     else

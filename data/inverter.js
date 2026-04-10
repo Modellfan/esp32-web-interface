@@ -68,6 +68,7 @@ var inverter = {
 
   firmwareVersion: 0,
   paramListRequestPending: false,
+  canMappingRequestPending: false,
 
   /** @brief send a command to the inverter */
   sendCmd: function(cmd, replyFunc, repeat, doneFunc)
@@ -143,16 +144,52 @@ var inverter = {
 
   /** @brief get CAN mapping from the inverter - only meant for wifi <-> can bridge */
   canMapping: function(replyFunc, args = "") {
+    if (inverter.canMappingRequestPending) {
+      return false;
+    }
+
+    inverter.canMappingRequestPending = true;
     var xmlhttp = new XMLHttpRequest();
     var req = "/canmap" + args;
+    var shouldPauseAutoReload = args !== "";
+    var shouldResumeAutoReload = false;
+
+    if (typeof ui !== 'undefined') {
+      ui.refreshPending = true;
+
+      if (shouldPauseAutoReload) {
+        var autoReloadCheckbox = document.getElementById('auto-reload-checkbox');
+        shouldResumeAutoReload = !!(autoReloadCheckbox && autoReloadCheckbox.checked);
+        if (shouldResumeAutoReload) {
+          ui.setAutoReload(false);
+        }
+      }
+    }
 
     xmlhttp.onload = function()
     {
-      if (replyFunc) replyFunc(JSON.parse(this.responseText));
+      if (this.status === 200 && replyFunc) {
+        replyFunc(JSON.parse(this.responseText));
+      }
+    }
+
+    xmlhttp.onreadystatechange = function() {
+      if (xmlhttp.readyState === XMLHttpRequest.DONE) {
+        inverter.canMappingRequestPending = false;
+
+        if (typeof ui !== 'undefined') {
+          ui.refreshPending = false;
+
+          if (shouldResumeAutoReload) {
+            ui.setAutoReload(true);
+          }
+        }
+      }
     }
 
     xmlhttp.open("GET", req, true);
     xmlhttp.send();
+    return true;
   },
 
   /** @brief Delete a CAN mapping
