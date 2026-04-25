@@ -9,6 +9,7 @@
             "name": "PlatformIO",
             "includePath": [
                 "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface",
+                "C:/Users/Win11 Pro/.platformio/packages/framework-arduinoespressif32/libraries/EEPROM/src",
                 "C:/Users/Win11 Pro/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src",
                 "C:/Users/Win11 Pro/.platformio/packages/framework-arduinoespressif32/libraries/Ticker/src",
                 "C:/Users/Win11 Pro/.platformio/packages/framework-arduinoespressif32/libraries/SPIFFS/src",
@@ -22,7 +23,6 @@
                 "C:/Users/Win11 Pro/.platformio/packages/framework-arduinoespressif32/libraries/Hash/src",
                 "C:/Users/Win11 Pro/.platformio/packages/framework-arduinoespressif32/libraries/Network/src",
                 "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/.pio/libdeps/debug/StreamUtils/src",
-                "C:/Users/Win11 Pro/.platformio/packages/framework-arduinoespressif32/libraries/EEPROM/src",
                 "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/.pio/libdeps/debug/ArduinoJson/src",
                 "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/.pio/libdeps/debug/RTClib/src",
                 "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/.pio/libdeps/debug/Adafruit BusIO",
@@ -362,6 +362,7 @@
                 "limitSymbolsToIncludedHeaders": true,
                 "path": [
                     "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface",
+                    "C:/Users/Win11 Pro/.platformio/packages/framework-arduinoespressif32/libraries/EEPROM/src",
                     "C:/Users/Win11 Pro/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src",
                     "C:/Users/Win11 Pro/.platformio/packages/framework-arduinoespressif32/libraries/Ticker/src",
                     "C:/Users/Win11 Pro/.platformio/packages/framework-arduinoespressif32/libraries/SPIFFS/src",
@@ -375,7 +376,6 @@
                     "C:/Users/Win11 Pro/.platformio/packages/framework-arduinoespressif32/libraries/Hash/src",
                     "C:/Users/Win11 Pro/.platformio/packages/framework-arduinoespressif32/libraries/Network/src",
                     "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/.pio/libdeps/debug/StreamUtils/src",
-                    "C:/Users/Win11 Pro/.platformio/packages/framework-arduinoespressif32/libraries/EEPROM/src",
                     "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/.pio/libdeps/debug/ArduinoJson/src",
                     "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/.pio/libdeps/debug/RTClib/src",
                     "C:/Users/Win11 Pro/Documents/Github/esp32-web-interface/.pio/libdeps/debug/Adafruit BusIO",

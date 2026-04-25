@@ -148,11 +148,12 @@ bool requestSchemaRefresh() {
 } // namespace
 
 void Init(uint8_t nodeId, BaudRate baud, int txPin, int rxPin) {
-  if (!OICanTask::StartTask()) {
-    return;
-  }
-
-  OICanTask::Reconfigure(nodeId, toTaskBaudRate(baud), txPin, rxPin);
+  OICanTask::sdo_task_config taskConfig;
+  taskConfig.nodeId = nodeId;
+  taskConfig.baudRate = toTaskBaudRate(baud);
+  taskConfig.txPin = txPin;
+  taskConfig.rxPin = rxPin;
+  OICanTask::StartTask(taskConfig);
 }
 
 void Loop() {

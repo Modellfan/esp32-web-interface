@@ -22,6 +22,7 @@
 #include <ArduinoJson.h>
 #include <FS.h>
 #include <SPIFFS.h>
+#include <algorithm>
 #include <cstdarg>
 #include <cstring>
 #include <inttypes.h>
@@ -70,19 +71,28 @@ constexpr uint8_t SDO_CMD_START = 4;
 constexpr uint8_t SDO_CMD_STOP = 5;
 
 constexpr size_t PAGE_SIZE_BYTES = 1024;
-constexpr size_t REQUEST_QUEUE_LENGTH = 24;
-constexpr size_t RESPONSE_QUEUE_LENGTH = 96;
+constexpr size_t DEFAULT_REQUEST_QUEUE_LENGTH = 24;
+constexpr size_t DEFAULT_RESPONSE_QUEUE_LENGTH = 96;
+constexpr size_t DEFAULT_TWAI_TX_QUEUE_LENGTH = 30;
+constexpr size_t DEFAULT_TWAI_RX_QUEUE_LENGTH = 30;
 constexpr size_t MAX_SIMPLE_REQUESTS = 20;
-constexpr size_t MAX_ACTIVE_REQUESTS = 4;
+constexpr size_t DEFAULT_MAX_ACTIVE_REQUESTS = 4;
+constexpr uint16_t DEFAULT_TASK_STACK_WORDS = 12288;
+constexpr uint8_t DEFAULT_TASK_PRIORITY = 2;
+constexpr size_t SCAN_MAX_INFLIGHT = 8;
 constexpr TickType_t DEFAULT_READ_TIMEOUT_TICKS = pdMS_TO_TICKS(40);
 constexpr TickType_t DEFAULT_WRITE_TIMEOUT_TICKS = pdMS_TO_TICKS(150);
 constexpr TickType_t DEFAULT_CONTROL_TIMEOUT_TICKS = pdMS_TO_TICKS(200);
+constexpr TickType_t SCAN_PROBE_TIMEOUT_TICKS = pdMS_TO_TICKS(20);
+constexpr TickType_t SCAN_SERIAL_TIMEOUT_TICKS = pdMS_TO_TICKS(25);
 constexpr TickType_t STARTUP_RETRY_INTERVAL_TICKS = pdMS_TO_TICKS(1000);
 constexpr TickType_t SIMPLE_RETRY_BACKOFF_TICKS = pdMS_TO_TICKS(15);
 constexpr uint8_t MAX_REQUEST_RETRIES = 1;
 constexpr uint32_t MIN_INTERFRAME_GAP_US = 1500;
 constexpr uint32_t TASK_IDLE_WAIT_MS = 5;
+constexpr TickType_t STATS_REFRESH_INTERVAL_TICKS = pdMS_TO_TICKS(250);
 constexpr uint32_t DOWNLOAD_PROGRESS_STEP = 100;
+constexpr uint8_t SCAN_PROGRESS_STEP_NODES = 8;
 
 enum class UpdateState : uint8_t {
   Idle,
@@ -113,15 +123,46 @@ struct SimpleRequestEntry {
   char name[kNameLength];
 };
 
+struct ScanProbeEntry {
+  bool inUse;
+  uint8_t nodeId;
+  TickType_t sentAt;
+};
+
+struct RuntimeCounters {
+  uint32_t canFramesTx;
+  uint32_t canFramesRx;
+  uint32_t canBytesTx;
+  uint32_t canBytesRx;
+  uint32_t canRepliesReceived;
+  uint32_t requestsAccepted;
+  uint32_t requestsCompleted;
+  uint32_t requestsFailed;
+  uint32_t requestTimeouts;
+  uint32_t responsesEmitted;
+};
+
 QueueHandle_t g_requestQueue = nullptr;
 QueueHandle_t g_responseQueue = nullptr;
 SemaphoreHandle_t g_apiMutex = nullptr;
+SemaphoreHandle_t g_taskStoppedSemaphore = nullptr;
 TaskHandle_t g_taskHandle = nullptr;
 portMUX_TYPE g_stateLock = portMUX_INITIALIZER_UNLOCKED;
 
 TaskState g_taskState = TaskState::Stopped;
 StatusPayload g_cachedStatus = {};
+sdo_task_config g_taskConfig = {};
+sdo_task_stats g_cachedTaskStats = {};
 uint32_t g_nextSequence = 1;
+bool g_stopRequested = false;
+TickType_t g_taskStartedAt = 0;
+TickType_t g_lastStatsRefreshAt = 0;
+TickType_t g_busLoadWindowStartedAt = 0;
+uint32_t g_busLoadWindowBits = 0;
+float g_currentBusLoadKbps = 0.0f;
+float g_currentBusLoadPercent = 0.0f;
+RuntimeCounters g_runtimeCounters = {};
+twai_status_info_t g_lastTwaiStatus = {};
 
 uint8_t g_nodeId = 1;
 uint8_t g_baudRate = 2;
@@ -132,6 +173,7 @@ bool g_traceEnabled = false;
 TickType_t g_lastStartupAttempt = 0;
 uint32_t g_serial[4] = {};
 char g_jsonFileName[kPathLength] = "";
+uint8_t g_activeRequestLimit = static_cast<uint8_t>(DEFAULT_MAX_ACTIVE_REQUESTS);
 
 ParamCacheEntry* g_paramCache = nullptr;
 size_t g_paramCacheCount = 0;
@@ -184,6 +226,53 @@ void copyCString(char* dest, size_t destSize, const char* src) {
   dest[destSize - 1U] = '\0';
 }
 
+sdo_task_config defaultTaskConfig() {
+  sdo_task_config config;
+  config.nodeId = 1U;
+  config.baudRate = 2U;
+  config.txPin = -1;
+  config.rxPin = -1;
+  config.requestQueueLength = DEFAULT_REQUEST_QUEUE_LENGTH;
+  config.responseQueueLength = DEFAULT_RESPONSE_QUEUE_LENGTH;
+  config.twaiTxQueueLength = DEFAULT_TWAI_TX_QUEUE_LENGTH;
+  config.twaiRxQueueLength = DEFAULT_TWAI_RX_QUEUE_LENGTH;
+  config.taskStackWords = DEFAULT_TASK_STACK_WORDS;
+  config.taskPriority = DEFAULT_TASK_PRIORITY;
+  config.maxActiveRequests = DEFAULT_MAX_ACTIVE_REQUESTS;
+  return config;
+}
+
+uint16_t sanitizeQueueLength(uint16_t value, uint16_t fallbackValue) {
+  return value == 0U ? fallbackValue : value;
+}
+
+uint8_t sanitizeMaxActiveRequests(uint8_t value) {
+  if (value == 0U) {
+    return static_cast<uint8_t>(DEFAULT_MAX_ACTIVE_REQUESTS);
+  }
+
+  if (value > MAX_SIMPLE_REQUESTS) {
+    return static_cast<uint8_t>(MAX_SIMPLE_REQUESTS);
+  }
+
+  return value;
+}
+
+CanBusState mapTwaiState(twai_state_t state) {
+  switch (state) {
+    case TWAI_STATE_STOPPED:
+      return CanBusState::Stopped;
+    case TWAI_STATE_RUNNING:
+      return CanBusState::Running;
+    case TWAI_STATE_BUS_OFF:
+      return CanBusState::BusOff;
+    case TWAI_STATE_RECOVERING:
+      return CanBusState::Recovering;
+    default:
+      return CanBusState::Unknown;
+  }
+}
+
 uint32_t baudRateToBitsPerSecond(uint8_t baudRate) {
   switch (baudRate) {
     case 0:
@@ -193,6 +282,18 @@ uint32_t baudRateToBitsPerSecond(uint8_t baudRate) {
     default:
       return 500000U;
   }
+}
+
+bool isValidNodeId(uint8_t nodeId) {
+  return nodeId >= 1U && nodeId <= 127U;
+}
+
+uint32_t sdoRequestId(uint8_t nodeId) {
+  return 0x600U | nodeId;
+}
+
+uint32_t sdoReplyId(uint8_t nodeId) {
+  return 0x580U | nodeId;
 }
 
 bool isSimpleScheduledCommand(Command command) {
@@ -232,8 +333,175 @@ uint16_t requestCountActive() {
   return count;
 }
 
+uint32_t estimateFrameBits(const twai_message_t& frame) {
+  const uint32_t dataBits = static_cast<uint32_t>(frame.rtr ? 0U : frame.data_length_code * 8U);
+  const uint32_t baseBits = frame.extd ? 67U : 47U;
+  const uint32_t crcAckIntermission = 13U;
+  return baseBits + dataBits + crcAckIntermission;
+}
+
+void freeParamCache();
+bool schemaFileExists();
+
+void refreshBusLoadSample(TickType_t now) {
+  if (g_busLoadWindowStartedAt == 0) {
+    g_busLoadWindowStartedAt = now;
+  }
+
+  const TickType_t elapsedTicks = now - g_busLoadWindowStartedAt;
+  if (elapsedTicks < pdMS_TO_TICKS(1000)) {
+    return;
+  }
+
+  const float elapsedSeconds = static_cast<float>(pdTICKS_TO_MS(elapsedTicks)) / 1000.0f;
+  if (elapsedSeconds <= 0.0f) {
+    return;
+  }
+
+  g_currentBusLoadKbps = static_cast<float>(g_busLoadWindowBits) / elapsedSeconds / 1000.0f;
+  const uint32_t baudRateBps = baudRateToBitsPerSecond(g_baudRate);
+  g_currentBusLoadPercent =
+      (baudRateBps == 0U) ? 0.0f : ((g_currentBusLoadKbps * 1000.0f) * 100.0f / static_cast<float>(baudRateBps));
+  g_busLoadWindowBits = 0U;
+  g_busLoadWindowStartedAt = now;
+}
+
+void noteCanTraffic(const twai_message_t& frame, bool transmitted) {
+  const uint32_t bytes = frame.rtr ? 0U : static_cast<uint32_t>(frame.data_length_code);
+  const uint32_t bits = estimateFrameBits(frame);
+
+  if (transmitted) {
+    g_runtimeCounters.canFramesTx++;
+    g_runtimeCounters.canBytesTx += bytes;
+  }
+  else {
+    g_runtimeCounters.canFramesRx++;
+    g_runtimeCounters.canBytesRx += bytes;
+  }
+
+  g_busLoadWindowBits += bits;
+  refreshBusLoadSample(xTaskGetTickCount());
+}
+
+void resetRuntimeState() {
+  memset(&g_runtimeCounters, 0, sizeof(g_runtimeCounters));
+  memset(&g_lastTwaiStatus, 0, sizeof(g_lastTwaiStatus));
+  memset(g_simpleRequests, 0, sizeof(g_simpleRequests));
+  g_hasPendingComplex = false;
+  g_pendingComplexRequest = {};
+  g_lastTxMicros = 0U;
+  g_taskStartedAt = xTaskGetTickCount();
+  g_lastStatsRefreshAt = 0;
+  g_busLoadWindowStartedAt = g_taskStartedAt;
+  g_busLoadWindowBits = 0U;
+  g_currentBusLoadKbps = 0.0f;
+  g_currentBusLoadPercent = 0.0f;
+  g_lastStartupAttempt = 0;
+  memset(g_serial, 0, sizeof(g_serial));
+  g_jsonFileName[0] = '\0';
+  g_updateState = UpdateState::Idle;
+  g_updateCurrentByte = 0U;
+  g_updateCurrentPage = 0U;
+  g_updateTotalPages = 0U;
+  g_updateCrc = 0xFFFFFFFFUL;
+  if (g_updateFile) {
+    g_updateFile.close();
+  }
+  freeParamCache();
+}
+
+void updateTaskStatsSnapshot() {
+  refreshBusLoadSample(xTaskGetTickCount());
+
+  twai_status_info_t twaiStatus = {};
+  if (g_driverInstalled) {
+    twai_get_status_info(&twaiStatus);
+    g_lastTwaiStatus = twaiStatus;
+  }
+  else {
+    memset(&g_lastTwaiStatus, 0, sizeof(g_lastTwaiStatus));
+  }
+
+  sdo_task_stats stats = {};
+  stats.taskRunning = (g_taskHandle != nullptr);
+  stats.driverInstalled = g_driverInstalled;
+  stats.traceEnabled = g_traceEnabled;
+  stats.schemaAvailable = schemaFileExists();
+  stats.errorPassive = (g_lastTwaiStatus.tx_error_counter >= 128U) || (g_lastTwaiStatus.rx_error_counter >= 128U);
+  stats.taskState = g_taskState;
+  stats.canState = g_driverInstalled ? mapTwaiState(g_lastTwaiStatus.state) : CanBusState::Stopped;
+  stats.nodeId = g_nodeId;
+  stats.baudRate = g_baudRate;
+  stats.txPin = g_txPin;
+  stats.rxPin = g_rxPin;
+  stats.maxActiveRequests = g_activeRequestLimit;
+  stats.requestQueueUsed =
+      (g_requestQueue != nullptr) ? static_cast<uint16_t>(uxQueueMessagesWaiting(g_requestQueue)) : 0U;
+  stats.requestQueueCapacity = g_taskConfig.requestQueueLength;
+  stats.responseQueueUsed =
+      (g_responseQueue != nullptr) ? static_cast<uint16_t>(uxQueueMessagesWaiting(g_responseQueue)) : 0U;
+  stats.responseQueueCapacity = g_taskConfig.responseQueueLength;
+  stats.queuedRequests = requestCountQueued();
+  stats.activeRequests = requestCountActive();
+  stats.uptimeMs = (g_taskStartedAt == 0) ? 0U : static_cast<uint32_t>(pdTICKS_TO_MS(xTaskGetTickCount() - g_taskStartedAt));
+  stats.canFramesTx = g_runtimeCounters.canFramesTx;
+  stats.canFramesRx = g_runtimeCounters.canFramesRx;
+  stats.canBytesTx = g_runtimeCounters.canBytesTx;
+  stats.canBytesRx = g_runtimeCounters.canBytesRx;
+  stats.canRepliesReceived = g_runtimeCounters.canRepliesReceived;
+  stats.currentBusLoadKbps = g_currentBusLoadKbps;
+  stats.currentBusLoadPercent = g_currentBusLoadPercent;
+  stats.requestsAccepted = g_runtimeCounters.requestsAccepted;
+  stats.requestsCompleted = g_runtimeCounters.requestsCompleted;
+  stats.requestsFailed = g_runtimeCounters.requestsFailed;
+  stats.requestTimeouts = g_runtimeCounters.requestTimeouts;
+  stats.responsesEmitted = g_runtimeCounters.responsesEmitted;
+  stats.txErrorCounter = g_lastTwaiStatus.tx_error_counter;
+  stats.rxErrorCounter = g_lastTwaiStatus.rx_error_counter;
+  stats.msgsToTx = g_lastTwaiStatus.msgs_to_tx;
+  stats.msgsToRx = g_lastTwaiStatus.msgs_to_rx;
+  stats.txFailedCount = g_lastTwaiStatus.tx_failed_count;
+  stats.rxMissedCount = g_lastTwaiStatus.rx_missed_count;
+  stats.rxOverrunCount = g_lastTwaiStatus.rx_overrun_count;
+  stats.arbLostCount = g_lastTwaiStatus.arb_lost_count;
+  stats.busErrorCount = g_lastTwaiStatus.bus_error_count;
+
+  portENTER_CRITICAL(&g_stateLock);
+  g_cachedTaskStats = stats;
+  portEXIT_CRITICAL(&g_stateLock);
+}
+
+void maybeRefreshTaskStats() {
+  const TickType_t now = xTaskGetTickCount();
+  if ((now - g_lastStatsRefreshAt) < STATS_REFRESH_INTERVAL_TICKS) {
+    return;
+  }
+
+  g_lastStatsRefreshAt = now;
+  updateTaskStatsSnapshot();
+}
+
 bool schemaFileExists() {
   return g_jsonFileName[0] != '\0' && SPIFFS.exists(g_jsonFileName);
+}
+
+bool schemaFileExistsAtPath(const char* path) {
+  return (path != nullptr) && (path[0] != '\0') && SPIFFS.exists(path);
+}
+
+uint32_t fileSizeAtPath(const char* path) {
+  if (!schemaFileExistsAtPath(path)) {
+    return 0U;
+  }
+
+  File file = SPIFFS.open(path, "r");
+  if (!file) {
+    return 0U;
+  }
+
+  const uint32_t size = static_cast<uint32_t>(file.size());
+  file.close();
+  return size;
 }
 
 void updateCachedStatus() {
@@ -247,11 +515,13 @@ void updateCachedStatus() {
   status.serialCrc = g_serial[3];
   status.queuedRequests = static_cast<uint8_t>(requestCountQueued());
   status.activeRequests = static_cast<uint8_t>(requestCountActive());
-  status.maxActiveRequests = static_cast<uint8_t>(MAX_ACTIVE_REQUESTS);
+  status.maxActiveRequests = g_activeRequestLimit;
 
   portENTER_CRITICAL(&g_stateLock);
   g_cachedStatus = status;
   portEXIT_CRITICAL(&g_stateLock);
+
+  updateTaskStatsSnapshot();
 }
 
 void setTaskState(TaskState state) {
@@ -304,6 +574,7 @@ esp_err_t transmitFrame(const twai_message_t& frame, TickType_t timeoutTicks) {
   const esp_err_t result = twai_transmit(&frame, timeoutTicks);
   if (result == ESP_OK) {
     g_lastTxMicros = micros();
+    noteCanTraffic(frame, true);
   }
 
 #ifdef DEBUG_CAN
@@ -320,6 +591,9 @@ esp_err_t transmitFrame(const twai_message_t& frame, TickType_t timeoutTicks) {
 
 esp_err_t receiveFrame(twai_message_t& frame, TickType_t timeoutTicks) {
   const esp_err_t result = twai_receive(&frame, timeoutTicks);
+  if (result == ESP_OK) {
+    noteCanTraffic(frame, false);
+  }
 
 #ifdef DEBUG_CAN
   if (result == ESP_OK) {
@@ -333,7 +607,18 @@ esp_err_t receiveFrame(twai_message_t& frame, TickType_t timeoutTicks) {
 void fillSdoReadFrame(twai_message_t& frame, uint16_t index, uint8_t subIndex) {
   memset(&frame, 0, sizeof(frame));
   frame.extd = false;
-  frame.identifier = 0x600 | g_nodeId;
+  frame.identifier = sdoRequestId(g_nodeId);
+  frame.data_length_code = 8;
+  frame.data[0] = SDO_READ;
+  frame.data[1] = static_cast<uint8_t>(index & 0xFFU);
+  frame.data[2] = static_cast<uint8_t>((index >> 8) & 0xFFU);
+  frame.data[3] = subIndex;
+}
+
+void fillSdoReadFrameForNode(twai_message_t& frame, uint16_t index, uint8_t subIndex, uint8_t nodeId) {
+  memset(&frame, 0, sizeof(frame));
+  frame.extd = false;
+  frame.identifier = sdoRequestId(nodeId);
   frame.data_length_code = 8;
   frame.data[0] = SDO_READ;
   frame.data[1] = static_cast<uint8_t>(index & 0xFFU);
@@ -344,7 +629,7 @@ void fillSdoReadFrame(twai_message_t& frame, uint16_t index, uint8_t subIndex) {
 void fillSdoWriteFrame(twai_message_t& frame, uint16_t index, uint8_t subIndex, uint32_t value) {
   memset(&frame, 0, sizeof(frame));
   frame.extd = false;
-  frame.identifier = 0x600 | g_nodeId;
+  frame.identifier = sdoRequestId(g_nodeId);
   frame.data_length_code = 8;
   frame.data[0] = SDO_WRITE;
   frame.data[1] = static_cast<uint8_t>(index & 0xFFU);
@@ -353,17 +638,37 @@ void fillSdoWriteFrame(twai_message_t& frame, uint16_t index, uint8_t subIndex, 
   writeU32LE(&frame.data[4], value);
 }
 
-void requestNextSegment(bool toggleBit) {
+void requestNextSegmentForNode(bool toggleBit, uint8_t nodeId) {
   twai_message_t frame = {};
   frame.extd = false;
-  frame.identifier = 0x600 | g_nodeId;
+  frame.identifier = sdoRequestId(nodeId);
   frame.data_length_code = 8;
   frame.data[0] = static_cast<uint8_t>(SDO_REQUEST_SEGMENT | (toggleBit ? SDO_TOGGLE_BIT : 0U));
   transmitFrame(frame, pdMS_TO_TICKS(10));
 }
 
 bool isExpectedSdoReply(const twai_message_t& frame, uint16_t index, uint8_t subIndex, uint8_t expectedCommand) {
-  if (frame.identifier != (0x580 | g_nodeId)) {
+  if (frame.identifier != sdoReplyId(g_nodeId)) {
+    return false;
+  }
+
+  if (readU16LE(&frame.data[1]) != index || frame.data[3] != subIndex) {
+    return false;
+  }
+
+  if (frame.data[0] == SDO_ABORT) {
+    return true;
+  }
+
+  return frame.data[0] == expectedCommand;
+}
+
+bool isExpectedSdoReplyForNode(const twai_message_t& frame,
+                               uint16_t index,
+                               uint8_t subIndex,
+                               uint8_t expectedCommand,
+                               uint8_t nodeId) {
+  if (frame.identifier != sdoReplyId(nodeId)) {
     return false;
   }
 
@@ -397,11 +702,13 @@ Result abortToResult(Command command, const twai_message_t& frame) {
 void emitResponse(const Response& response) {
   if (g_responseQueue != nullptr) {
     xQueueSend(g_responseQueue, &response, pdMS_TO_TICKS(50));
+    g_runtimeCounters.responsesEmitted++;
   }
 }
 
 void emitAccepted(const Request& request) {
   tracef("accepted seq=%" PRIu32 " cmd=%u", request.sequence, static_cast<unsigned>(request.command));
+  g_runtimeCounters.requestsAccepted++;
   Response response = {};
   response.sequence = request.sequence;
   response.command = request.command;
@@ -416,6 +723,15 @@ void emitTerminal(const Request& request, Result result) {
          request.sequence,
          static_cast<unsigned>(request.command),
          static_cast<unsigned>(result));
+  if (result == Result::Ok) {
+    g_runtimeCounters.requestsCompleted++;
+  }
+  else {
+    g_runtimeCounters.requestsFailed++;
+    if (result == Result::Timeout) {
+      g_runtimeCounters.requestTimeouts++;
+    }
+  }
   Response response = {};
   response.sequence = request.sequence;
   response.command = request.command;
@@ -463,15 +779,29 @@ void emitFileReady(uint32_t sequence, Command command, const char* path, uint32_
   emitResponse(response);
 }
 
+void emitSerialEvent(uint32_t sequence, Command command, uint8_t nodeId, const uint32_t serialWords[4]) {
+  Response response = {};
+  response.sequence = sequence;
+  response.command = command;
+  response.kind = ResponseKind::Serial;
+  response.result = Result::Ok;
+  response.terminal = false;
+  response.data.serial.nodeId = nodeId;
+  memcpy(response.data.serial.words, serialWords, sizeof(response.data.serial.words));
+  emitResponse(response);
+}
+
 void emitValueEvent(uint32_t sequence,
                     Command command,
+                    uint8_t nodeId,
                     const char* name,
                     uint16_t paramId,
                     float value,
                     uint16_t sampleIndex) {
-  tracef("value seq=%" PRIu32 " cmd=%u name=%s param=0x%04X value=%.3f sample=%u",
+  tracef("value seq=%" PRIu32 " cmd=%u node=%u name=%s param=0x%04X value=%.3f sample=%u",
          sequence,
          static_cast<unsigned>(command),
+         nodeId,
          name,
          paramId,
          value,
@@ -482,6 +812,7 @@ void emitValueEvent(uint32_t sequence,
   response.kind = ResponseKind::Value;
   response.result = Result::Ok;
   response.terminal = false;
+  response.data.value.nodeId = nodeId;
   copyCString(response.data.value.name, sizeof(response.data.value.name), name);
   response.data.value.paramId = paramId;
   response.data.value.value = value;
@@ -607,6 +938,8 @@ uint16_t requestParamId(uint16_t index, uint8_t subIndex) {
   return static_cast<uint16_t>(((index & 0xFFU) << 8) | subIndex);
 }
 
+Result readValueByIdForNode(uint8_t nodeId, int id, float& valueOut, TickType_t timeoutTicks);
+
 bool waitForMatchingReply(twai_message_t& frame,
                           uint16_t index,
                           uint8_t subIndex,
@@ -626,6 +959,35 @@ bool waitForMatchingReply(twai_message_t& frame,
     }
 
     if (isExpectedSdoReply(frame, index, subIndex, expectedCommand)) {
+      g_runtimeCounters.canRepliesReceived++;
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool waitForMatchingReplyForNode(twai_message_t& frame,
+                                 uint16_t index,
+                                 uint8_t subIndex,
+                                 uint8_t expectedCommand,
+                                 uint8_t nodeId,
+                                 TickType_t timeoutTicks) {
+  const TickType_t startTicks = xTaskGetTickCount();
+
+  while ((xTaskGetTickCount() - startTicks) < timeoutTicks) {
+    const TickType_t elapsedTicks = xTaskGetTickCount() - startTicks;
+    const TickType_t remainingTicks = timeoutTicks - elapsedTicks;
+    if (remainingTicks == 0) {
+      break;
+    }
+
+    if (receiveFrame(frame, remainingTicks) != ESP_OK) {
+      return false;
+    }
+
+    if (isExpectedSdoReplyForNode(frame, index, subIndex, expectedCommand, nodeId)) {
+      g_runtimeCounters.canRepliesReceived++;
       return true;
     }
   }
@@ -634,17 +996,25 @@ bool waitForMatchingReply(twai_message_t& frame,
 }
 
 Result readValueById(int id, float& valueOut) {
+  return readValueByIdForNode(g_nodeId, id, valueOut, DEFAULT_READ_TIMEOUT_TICKS);
+}
+
+Result readValueByIdForNode(uint8_t nodeId, int id, float& valueOut, TickType_t timeoutTicks) {
+  if (!isValidNodeId(nodeId) || id <= 0) {
+    return Result::InvalidRequest;
+  }
+
   twai_message_t txFrame;
   twai_message_t rxFrame;
   const uint16_t index = paramIdToIndex(id);
   const uint8_t subIndex = paramIdToSubIndex(id);
 
-  fillSdoReadFrame(txFrame, index, subIndex);
+  fillSdoReadFrameForNode(txFrame, index, subIndex, nodeId);
   if (transmitFrame(txFrame, pdMS_TO_TICKS(10)) != ESP_OK) {
     return Result::CommError;
   }
 
-  if (!waitForMatchingReply(rxFrame, index, subIndex, SDO_READ_REPLY, DEFAULT_READ_TIMEOUT_TICKS)) {
+  if (!waitForMatchingReplyForNode(rxFrame, index, subIndex, SDO_READ_REPLY, nodeId, timeoutTicks)) {
     return Result::Timeout;
   }
 
@@ -686,10 +1056,19 @@ void cancelSimpleRequests(Result result) {
   updateCachedStatus();
 }
 
-bool installDriver(uint8_t nodeId, uint8_t baudRate, int txPin, int rxPin) {
+void shutdownDriver() {
+  if (!g_driverInstalled) {
+    return;
+  }
+
   twai_stop();
   twai_driver_uninstall();
   g_driverInstalled = false;
+  memset(&g_lastTwaiStatus, 0, sizeof(g_lastTwaiStatus));
+}
+
+bool installDriver(uint8_t nodeId, uint8_t baudRate, int txPin, int rxPin) {
+  shutdownDriver();
 
   twai_general_config_t gConfig = {
       .mode = TWAI_MODE_NORMAL,
@@ -697,8 +1076,8 @@ bool installDriver(uint8_t nodeId, uint8_t baudRate, int txPin, int rxPin) {
       .rx_io = static_cast<gpio_num_t>(rxPin),
       .clkout_io = TWAI_IO_UNUSED,
       .bus_off_io = TWAI_IO_UNUSED,
-      .tx_queue_len = 30,
-      .rx_queue_len = 30,
+      .tx_queue_len = sanitizeQueueLength(g_taskConfig.twaiTxQueueLength, DEFAULT_TWAI_TX_QUEUE_LENGTH),
+      .rx_queue_len = sanitizeQueueLength(g_taskConfig.twaiRxQueueLength, DEFAULT_TWAI_RX_QUEUE_LENGTH),
       .alerts_enabled = TWAI_ALERT_NONE,
       .clkout_divider = 0,
       .intr_flags = 0};
@@ -716,11 +1095,10 @@ bool installDriver(uint8_t nodeId, uint8_t baudRate, int txPin, int rxPin) {
       break;
   }
 
-  const uint16_t id = static_cast<uint16_t>(0x580U + nodeId);
-  const twai_filter_config_t fConfig = {
-      .acceptance_code = (static_cast<uint32_t>(id) << 5) | (static_cast<uint32_t>(0x7deU) << 21),
-      .acceptance_mask = 0x001F001FU,
-      .single_filter = false};
+  // Accept all standard frames and filter target nodes in software.
+  // This keeps task ownership of the bus while allowing debug queries such as
+  // `getserial <nodeId>` without reinstalling the driver.
+  const twai_filter_config_t fConfig = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
   if (twai_driver_install(&gConfig, &tConfig, &fConfig) != ESP_OK) {
     return false;
@@ -740,17 +1118,21 @@ bool installDriver(uint8_t nodeId, uint8_t baudRate, int txPin, int rxPin) {
   return true;
 }
 
-Result obtainSerialSynchronously(uint32_t serialOut[4]) {
+Result obtainSerialSynchronously(uint8_t nodeId, uint32_t serialOut[4], TickType_t timeoutTicks) {
+  if (!isValidNodeId(nodeId)) {
+    return Result::InvalidRequest;
+  }
+
   twai_message_t txFrame;
   twai_message_t rxFrame;
 
   for (uint8_t subIndex = 0; subIndex < 4U; subIndex++) {
-    fillSdoReadFrame(txFrame, SDO_INDEX_SERIAL, subIndex);
+    fillSdoReadFrameForNode(txFrame, SDO_INDEX_SERIAL, subIndex, nodeId);
     if (transmitFrame(txFrame, pdMS_TO_TICKS(10)) != ESP_OK) {
       return Result::CommError;
     }
 
-    if (!waitForMatchingReply(rxFrame, SDO_INDEX_SERIAL, subIndex, SDO_READ_REPLY, DEFAULT_READ_TIMEOUT_TICKS)) {
+    if (!waitForMatchingReplyForNode(rxFrame, SDO_INDEX_SERIAL, subIndex, SDO_READ_REPLY, nodeId, timeoutTicks)) {
       return Result::Timeout;
     }
 
@@ -764,27 +1146,77 @@ Result obtainSerialSynchronously(uint32_t serialOut[4]) {
   return Result::Ok;
 }
 
-Result downloadSchemaSynchronously(uint32_t sequence, bool emitEvents) {
-  if (g_jsonFileName[0] == '\0') {
+Result completeSerialFromFirstWord(uint8_t nodeId, uint32_t firstWord, uint32_t serialOut[4], TickType_t timeoutTicks) {
+  if (!isValidNodeId(nodeId)) {
+    return Result::InvalidRequest;
+  }
+
+  serialOut[0] = firstWord;
+
+  twai_message_t txFrame;
+  twai_message_t rxFrame;
+  for (uint8_t subIndex = 1; subIndex < 4U; subIndex++) {
+    fillSdoReadFrameForNode(txFrame, SDO_INDEX_SERIAL, subIndex, nodeId);
+    if (transmitFrame(txFrame, pdMS_TO_TICKS(10)) != ESP_OK) {
+      return Result::CommError;
+    }
+
+    if (!waitForMatchingReplyForNode(rxFrame, SDO_INDEX_SERIAL, subIndex, SDO_READ_REPLY, nodeId, timeoutTicks)) {
+      return Result::Timeout;
+    }
+
+    if (rxFrame.data[0] == SDO_ABORT) {
+      return Result::CommError;
+    }
+
+    serialOut[subIndex] = readU32LE(&rxFrame.data[4]);
+  }
+
+  return Result::Ok;
+}
+
+bool validateSchemaFileAtPath(const char* path) {
+  if (!schemaFileExistsAtPath(path)) {
+    return false;
+  }
+
+  File file = SPIFFS.open(path, "r");
+  if (!file) {
+    return false;
+  }
+
+  JsonDocument doc;
+  const DeserializationError error = deserializeJson(doc, file);
+  file.close();
+  return error == DeserializationError::Ok;
+}
+
+Result downloadSchemaSynchronouslyForNode(uint8_t nodeId,
+                                          const char* path,
+                                          uint32_t sequence,
+                                          Command command,
+                                          bool emitEvents,
+                                          bool installCurrentCache) {
+  if ((path == nullptr) || (path[0] == '\0')) {
     return Result::FileError;
   }
 
-  File file = SPIFFS.open(g_jsonFileName, "w+");
+  File file = SPIFFS.open(path, "w+");
   if (!file) {
     return Result::FileError;
   }
 
   twai_message_t txFrame;
   twai_message_t rxFrame;
-  fillSdoReadFrame(txFrame, SDO_INDEX_STRINGS, 0);
+  fillSdoReadFrameForNode(txFrame, SDO_INDEX_STRINGS, 0, nodeId);
   if (transmitFrame(txFrame, pdMS_TO_TICKS(10)) != ESP_OK) {
     file.close();
-    SPIFFS.remove(g_jsonFileName);
+    SPIFFS.remove(path);
     return Result::CommError;
   }
 
   if (emitEvents) {
-    emitProgress(sequence, Command::DownloadSchemaJson, "started", 0, 0);
+    emitProgress(sequence, command, "started", 0, 0);
   }
 
   bool toggleBit = false;
@@ -794,22 +1226,22 @@ Result downloadSchemaSynchronously(uint32_t sequence, bool emitEvents) {
   while (true) {
     if (receiveFrame(rxFrame, pdMS_TO_TICKS(200)) != ESP_OK) {
       file.close();
-      SPIFFS.remove(g_jsonFileName);
+      SPIFFS.remove(path);
       return Result::Timeout;
     }
 
-    if (rxFrame.identifier != (0x580 | g_nodeId)) {
+    if (rxFrame.identifier != sdoReplyId(nodeId)) {
       continue;
     }
 
     if (rxFrame.data[0] == SDO_ABORT) {
       file.close();
-      SPIFFS.remove(g_jsonFileName);
+      SPIFFS.remove(path);
       return Result::CommError;
     }
 
     if ((rxFrame.data[0] & SDO_READ) == SDO_READ) {
-      requestNextSegment(toggleBit);
+      requestNextSegmentForNode(toggleBit, nodeId);
       continue;
     }
 
@@ -826,25 +1258,31 @@ Result downloadSchemaSynchronously(uint32_t sequence, bool emitEvents) {
       file.write(&rxFrame.data[1], 7);
       bytesWritten += 7U;
       toggleBit = !toggleBit;
-      requestNextSegment(toggleBit);
+      requestNextSegmentForNode(toggleBit, nodeId);
 
       if (emitEvents && ((bytesWritten - lastProgress) >= DOWNLOAD_PROGRESS_STEP)) {
         lastProgress = bytesWritten;
-        emitProgress(sequence, Command::DownloadSchemaJson, "downloading", bytesWritten, 0);
+        emitProgress(sequence, command, "downloading", bytesWritten, 0);
       }
     }
   }
 
   file.close();
 
-  if (!loadParamCache()) {
-    SPIFFS.remove(g_jsonFileName);
+  if (installCurrentCache) {
+    if (!loadParamCache()) {
+      SPIFFS.remove(path);
+      return Result::FileError;
+    }
+  }
+  else if (!validateSchemaFileAtPath(path)) {
+    SPIFFS.remove(path);
     return Result::FileError;
   }
 
   if (emitEvents) {
-    emitProgress(sequence, Command::DownloadSchemaJson, "downloading", bytesWritten, bytesWritten);
-    emitFileReady(sequence, Command::DownloadSchemaJson, g_jsonFileName, static_cast<uint32_t>(bytesWritten));
+    emitProgress(sequence, command, "downloading", bytesWritten, bytesWritten);
+    emitFileReady(sequence, command, path, static_cast<uint32_t>(bytesWritten));
   }
 
   return Result::Ok;
@@ -856,7 +1294,7 @@ Result ensureSchemaAvailable(bool forceRedownload, uint32_t sequence, bool emitE
   }
 
   uint32_t serial[4] = {};
-  const Result serialResult = obtainSerialSynchronously(serial);
+  const Result serialResult = obtainSerialSynchronously(g_nodeId, serial, DEFAULT_READ_TIMEOUT_TICKS);
   if (serialResult != Result::Ok) {
     return serialResult;
   }
@@ -875,7 +1313,8 @@ Result ensureSchemaAvailable(bool forceRedownload, uint32_t sequence, bool emitE
   }
 
   setTaskState(TaskState::DownloadingJson);
-  const Result downloadResult = downloadSchemaSynchronously(sequence, emitEvents);
+  const Result downloadResult =
+      downloadSchemaSynchronouslyForNode(g_nodeId, g_jsonFileName, sequence, Command::DownloadSchemaJson, emitEvents, true);
   if (downloadResult == Result::Ok) {
     setTaskState(TaskState::Ready);
   }
@@ -906,6 +1345,7 @@ Result completeSimpleRequest(SimpleRequestEntry& entry, const twai_message_t& fr
     const float value = static_cast<float>(readI32LE(&frame.data[4])) / 32.0f;
     emitValueEvent(entry.request.sequence,
                    entry.request.command,
+                   g_nodeId,
                    entry.name,
                    requestParamId(entry.index, entry.subIndex),
                    value,
@@ -957,6 +1397,7 @@ void processIncomingCanFrame(const twai_message_t& frame) {
         continue;
       }
 
+      g_runtimeCounters.canRepliesReceived++;
       completeSimpleRequest(entry, frame);
       return;
     }
@@ -1160,7 +1601,7 @@ void dispatchSimpleRequests() {
       continue;
     }
 
-    if (activeCount >= MAX_ACTIVE_REQUESTS) {
+    if (activeCount >= g_activeRequestLimit) {
       break;
     }
 
@@ -1300,6 +1741,7 @@ Result processReadLiveSnapshot(const Request& request) {
     if (readValueById(id, value) == Result::Ok) {
       emitValueEvent(request.sequence,
                      request.command,
+                     g_nodeId,
                      kv.key().c_str(),
                      static_cast<uint16_t>(id),
                      value,
@@ -1315,6 +1757,9 @@ Result processReadCanMap(const Request& request) {
   if (!isReadyForSdoCommand()) {
     return Result::NotReady;
   }
+
+  const uint8_t targetNodeId =
+      isValidNodeId(request.data.readCanMap.nodeId) ? request.data.readCanMap.nodeId : g_nodeId;
 
   enum class ReqMapState : uint8_t { Start, CobId, DataPosLen, GainOfs, Done };
 
@@ -1332,7 +1777,7 @@ Result processReadCanMap(const Request& request) {
   while (state != ReqMapState::Done) {
     switch (state) {
       case ReqMapState::Start:
-        fillSdoReadFrame(txFrame, index, 0);
+        fillSdoReadFrameForNode(txFrame, index, 0, targetNodeId);
         if (transmitFrame(txFrame, pdMS_TO_TICKS(10)) != ESP_OK) {
           return Result::CommError;
         }
@@ -1343,14 +1788,19 @@ Result processReadCanMap(const Request& request) {
         paramId = 0;
         break;
       case ReqMapState::CobId:
-        if (!waitForMatchingReply(rxFrame, index, 0, SDO_READ_REPLY, DEFAULT_READ_TIMEOUT_TICKS)) {
+        if (!waitForMatchingReplyForNode(rxFrame,
+                                         index,
+                                         0,
+                                         SDO_READ_REPLY,
+                                         targetNodeId,
+                                         DEFAULT_READ_TIMEOUT_TICKS)) {
           state = ReqMapState::Done;
           break;
         }
         if (rxFrame.data[0] != SDO_ABORT) {
           cobId = readI32LE(&rxFrame.data[4]);
           subIndex = 1;
-          fillSdoReadFrame(txFrame, index, subIndex);
+          fillSdoReadFrameForNode(txFrame, index, subIndex, targetNodeId);
           if (transmitFrame(txFrame, pdMS_TO_TICKS(10)) != ESP_OK) {
             return Result::CommError;
           }
@@ -1366,7 +1816,12 @@ Result processReadCanMap(const Request& request) {
         }
         break;
       case ReqMapState::DataPosLen:
-        if (!waitForMatchingReply(rxFrame, index, subIndex, SDO_READ_REPLY, DEFAULT_READ_TIMEOUT_TICKS)) {
+        if (!waitForMatchingReplyForNode(rxFrame,
+                                         index,
+                                         subIndex,
+                                         SDO_READ_REPLY,
+                                         targetNodeId,
+                                         DEFAULT_READ_TIMEOUT_TICKS)) {
           state = ReqMapState::Done;
           break;
         }
@@ -1375,7 +1830,7 @@ Result processReadCanMap(const Request& request) {
           pos = rxFrame.data[6];
           len = static_cast<int8_t>(rxFrame.data[7]);
           subIndex++;
-          fillSdoReadFrame(txFrame, index, subIndex);
+          fillSdoReadFrameForNode(txFrame, index, subIndex, targetNodeId);
           if (transmitFrame(txFrame, pdMS_TO_TICKS(10)) != ESP_OK) {
             return Result::CommError;
           }
@@ -1388,7 +1843,12 @@ Result processReadCanMap(const Request& request) {
         }
         break;
       case ReqMapState::GainOfs:
-        if (!waitForMatchingReply(rxFrame, index, subIndex, SDO_READ_REPLY, DEFAULT_READ_TIMEOUT_TICKS)) {
+        if (!waitForMatchingReplyForNode(rxFrame,
+                                         index,
+                                         subIndex,
+                                         SDO_READ_REPLY,
+                                         targetNodeId,
+                                         DEFAULT_READ_TIMEOUT_TICKS)) {
           state = ReqMapState::Done;
           break;
         }
@@ -1413,7 +1873,7 @@ Result processReadCanMap(const Request& request) {
                                subIndex);
           subIndex++;
           if (subIndex < 100U) {
-            fillSdoReadFrame(txFrame, index, subIndex);
+            fillSdoReadFrameForNode(txFrame, index, subIndex, targetNodeId);
             if (transmitFrame(txFrame, pdMS_TO_TICKS(10)) != ESP_OK) {
               return Result::CommError;
             }
@@ -1465,7 +1925,46 @@ Result processStreamValues(const Request& request) {
     return Result::NotReady;
   }
 
+  if (request.data.streamValues.samples == 0U) {
+    return Result::Ok;
+  }
+
+  if (request.data.streamValues.allValues && (g_paramCache == nullptr) && !loadParamCache()) {
+    return Result::FileError;
+  }
+
+  const uint16_t sampleRateHz = request.data.streamValues.sampleRateHz;
+  const TickType_t sampleIntervalTicks =
+      (sampleRateHz == 0U) ? 0U : (std::max<TickType_t>(pdMS_TO_TICKS(1000U / sampleRateHz), 1U));
+  TickType_t lastWakeTicks = xTaskGetTickCount();
+
   for (uint16_t sample = 0; sample < request.data.streamValues.samples; sample++) {
+    if ((sample > 0U) && (sampleIntervalTicks > 0U)) {
+      vTaskDelayUntil(&lastWakeTicks, sampleIntervalTicks);
+    }
+    else {
+      lastWakeTicks = xTaskGetTickCount();
+    }
+
+    if (request.data.streamValues.allValues) {
+      for (size_t i = 0; i < g_paramCacheCount; i++) {
+        float value = 0.0f;
+        const Result valueResult = readValueById(static_cast<int>(g_paramCache[i].id), value);
+        if (valueResult != Result::Ok) {
+          value = 0.0f;
+        }
+
+        emitValueEvent(request.sequence,
+                       request.command,
+                       g_nodeId,
+                       g_paramCache[i].name,
+                       g_paramCache[i].id,
+                       value,
+                       sample);
+      }
+      continue;
+    }
+
     const char* cursor = request.data.streamValues.namesCsv;
     bool done = false;
     while (!done) {
@@ -1489,6 +1988,7 @@ Result processStreamValues(const Request& request) {
 
       emitValueEvent(request.sequence,
                      request.command,
+                     g_nodeId,
                      name,
                      (id > 0) ? static_cast<uint16_t>(id) : 0U,
                      value,
@@ -1548,12 +2048,260 @@ Result processDownloadSchemaJson(const Request& request) {
     return Result::CommError;
   }
 
-  if (request.data.downloadSchemaJson.forceRedownload && schemaFileExists()) {
-    SPIFFS.remove(g_jsonFileName);
-    freeParamCache();
+  const uint8_t targetNodeId =
+      isValidNodeId(request.data.downloadSchemaJson.nodeId) ? request.data.downloadSchemaJson.nodeId : g_nodeId;
+
+  if (targetNodeId == g_nodeId) {
+    if (request.data.downloadSchemaJson.forceRedownload && schemaFileExists()) {
+      SPIFFS.remove(g_jsonFileName);
+      freeParamCache();
+    }
+
+    return ensureSchemaAvailable(request.data.downloadSchemaJson.forceRedownload, request.sequence, true);
   }
 
-  return ensureSchemaAvailable(request.data.downloadSchemaJson.forceRedownload, request.sequence, true);
+  uint32_t serial[4] = {};
+  const Result serialResult = obtainSerialSynchronously(targetNodeId, serial, DEFAULT_READ_TIMEOUT_TICKS);
+  if (serialResult != Result::Ok) {
+    return serialResult;
+  }
+
+  char targetPath[kPathLength] = {};
+  snprintf(targetPath, sizeof(targetPath), "/%" PRIx32 ".json", serial[3]);
+
+  if (request.data.downloadSchemaJson.forceRedownload && schemaFileExistsAtPath(targetPath)) {
+    SPIFFS.remove(targetPath);
+  }
+
+  if (!request.data.downloadSchemaJson.forceRedownload && schemaFileExistsAtPath(targetPath)) {
+    emitProgress(request.sequence, Command::DownloadSchemaJson, "cached", fileSizeAtPath(targetPath), fileSizeAtPath(targetPath));
+    emitFileReady(request.sequence, Command::DownloadSchemaJson, targetPath, fileSizeAtPath(targetPath));
+    return Result::Ok;
+  }
+
+  tracef("download seq=%" PRIu32 " node=%u path=%s",
+         request.sequence,
+         targetNodeId,
+         targetPath);
+  return downloadSchemaSynchronouslyForNode(targetNodeId,
+                                            targetPath,
+                                            request.sequence,
+                                            Command::DownloadSchemaJson,
+                                            true,
+                                            false);
+}
+
+Result processGetSerial(const Request& request) {
+  if (!g_driverInstalled) {
+    return Result::CommError;
+  }
+
+  if (g_updateState != UpdateState::Idle) {
+    return Result::Busy;
+  }
+
+  const uint8_t targetNodeId = request.data.getSerial.nodeId;
+  uint32_t serial[4] = {};
+  const TickType_t timeoutTicks = (request.timeoutTicks > 0) ? request.timeoutTicks : DEFAULT_READ_TIMEOUT_TICKS;
+  const Result result = obtainSerialSynchronously(targetNodeId, serial, timeoutTicks);
+  if (result != Result::Ok) {
+    return result;
+  }
+
+  if (targetNodeId == g_nodeId) {
+    memcpy(g_serial, serial, sizeof(g_serial));
+    updateCachedStatus();
+  }
+
+  tracef("serial seq=%" PRIu32 " node=%u crc=0x%08" PRIX32,
+         request.sequence,
+         targetNodeId,
+         serial[3]);
+  emitSerialEvent(request.sequence, Command::GetSerial, targetNodeId, serial);
+  return Result::Ok;
+}
+
+Result processGetValueById(const Request& request) {
+  if (!g_driverInstalled) {
+    return Result::CommError;
+  }
+
+  if (g_updateState != UpdateState::Idle) {
+    return Result::Busy;
+  }
+
+  const uint8_t targetNodeId = request.data.getValueById.nodeId;
+  const uint16_t paramId = request.data.getValueById.paramId;
+  const TickType_t timeoutTicks = (request.timeoutTicks > 0) ? request.timeoutTicks : DEFAULT_READ_TIMEOUT_TICKS;
+  float value = 0.0f;
+  const Result result = readValueByIdForNode(targetNodeId, static_cast<int>(paramId), value, timeoutTicks);
+  if (result != Result::Ok) {
+    return result;
+  }
+
+  tracef("direct value seq=%" PRIu32 " node=%u param=0x%04X value=%.3f",
+         request.sequence,
+         targetNodeId,
+         paramId,
+         value);
+  emitValueEvent(request.sequence,
+                 Command::GetValueById,
+                 targetNodeId,
+                 "",
+                 paramId,
+                 value,
+                 0);
+  return Result::Ok;
+}
+
+Result processScanNodes(const Request& request) {
+  if (!g_driverInstalled) {
+    return Result::CommError;
+  }
+
+  if (g_updateState != UpdateState::Idle) {
+    return Result::Busy;
+  }
+
+  const uint8_t lastNode = request.data.scanNodes.lastNode;
+  if (!isValidNodeId(lastNode)) {
+    return Result::InvalidRequest;
+  }
+
+  const TickType_t probeTimeoutTicks = (request.timeoutTicks > 0) ? request.timeoutTicks : SCAN_PROBE_TIMEOUT_TICKS;
+  ScanProbeEntry probes[SCAN_MAX_INFLIGHT] = {};
+  uint8_t hitNodes[127] = {};
+  uint32_t hitFirstWords[127] = {};
+  size_t hitCount = 0;
+  uint8_t nextNode = 1;
+  uint8_t completed = 0;
+  uint8_t lastProgressReported = 0;
+
+  emitProgress(request.sequence, Command::ScanNodes, "probing", 0, lastNode);
+
+  auto emitProbeProgress = [&](bool force) {
+    if (force || (completed >= static_cast<uint8_t>(lastProgressReported + SCAN_PROGRESS_STEP_NODES))) {
+      lastProgressReported = completed;
+      emitProgress(request.sequence, Command::ScanNodes, "probing", completed, lastNode);
+    }
+  };
+
+  auto dispatchProbe = [&](ScanProbeEntry& slot, uint8_t nodeId) -> Result {
+    twai_message_t txFrame;
+    fillSdoReadFrameForNode(txFrame, SDO_INDEX_SERIAL, 0, nodeId);
+    if (transmitFrame(txFrame, pdMS_TO_TICKS(10)) != ESP_OK) {
+      return Result::CommError;
+    }
+
+    slot.inUse = true;
+    slot.nodeId = nodeId;
+    slot.sentAt = xTaskGetTickCount();
+    tracef("scan probe seq=%" PRIu32 " node=%u", request.sequence, nodeId);
+    return Result::Ok;
+  };
+
+  auto retireExpiredProbes = [&]() {
+    const TickType_t now = xTaskGetTickCount();
+    for (ScanProbeEntry& slot : probes) {
+      if (!slot.inUse) {
+        continue;
+      }
+
+      if ((now - slot.sentAt) >= probeTimeoutTicks) {
+        tracef("scan miss seq=%" PRIu32 " node=%u", request.sequence, slot.nodeId);
+        slot = {};
+        completed++;
+      }
+    }
+  };
+
+  while (completed < lastNode) {
+    for (ScanProbeEntry& slot : probes) {
+      if (slot.inUse || nextNode > lastNode) {
+        continue;
+      }
+
+      const Result dispatchResult = dispatchProbe(slot, nextNode);
+      if (dispatchResult != Result::Ok) {
+        return dispatchResult;
+      }
+      nextNode++;
+    }
+
+    TickType_t waitTicks = probeTimeoutTicks;
+    const TickType_t now = xTaskGetTickCount();
+    for (const ScanProbeEntry& slot : probes) {
+      if (!slot.inUse) {
+        continue;
+      }
+
+      const TickType_t elapsed = now - slot.sentAt;
+      const TickType_t remaining = (elapsed < probeTimeoutTicks) ? (probeTimeoutTicks - elapsed) : 0;
+      if (remaining < waitTicks) {
+        waitTicks = remaining;
+      }
+    }
+
+    if (waitTicks == 0) {
+      waitTicks = 1;
+    }
+
+    twai_message_t frame;
+    if (receiveFrame(frame, waitTicks) == ESP_OK) {
+      for (ScanProbeEntry& slot : probes) {
+        if (!slot.inUse || !isExpectedSdoReplyForNode(frame, SDO_INDEX_SERIAL, 0, SDO_READ_REPLY, slot.nodeId)) {
+          continue;
+        }
+
+        g_runtimeCounters.canRepliesReceived++;
+        if (frame.data[0] != SDO_ABORT && hitCount < sizeof(hitNodes)) {
+          hitNodes[hitCount] = slot.nodeId;
+          hitFirstWords[hitCount] = readU32LE(&frame.data[4]);
+          tracef("scan hit seq=%" PRIu32 " node=%u word0=0x%08" PRIX32,
+                 request.sequence,
+                 slot.nodeId,
+                 hitFirstWords[hitCount]);
+          hitCount++;
+        }
+
+        slot = {};
+        completed++;
+        break;
+      }
+    }
+
+    retireExpiredProbes();
+    emitProbeProgress(false);
+  }
+
+  emitProbeProgress(true);
+
+  if (hitCount > 0U) {
+    emitProgress(request.sequence, Command::ScanNodes, "reading", 0, static_cast<uint32_t>(hitCount));
+  }
+
+  for (size_t i = 0; i < hitCount; i++) {
+    uint32_t serial[4] = {};
+    const Result serialResult = completeSerialFromFirstWord(hitNodes[i], hitFirstWords[i], serial, SCAN_SERIAL_TIMEOUT_TICKS);
+    if (serialResult != Result::Ok) {
+      tracef("scan serial failed seq=%" PRIu32 " node=%u result=%u",
+             request.sequence,
+             hitNodes[i],
+             static_cast<unsigned>(serialResult));
+      continue;
+    }
+
+    if (hitNodes[i] == g_nodeId) {
+      memcpy(g_serial, serial, sizeof(g_serial));
+      updateCachedStatus();
+    }
+
+    emitSerialEvent(request.sequence, Command::ScanNodes, hitNodes[i], serial);
+    emitProgress(request.sequence, Command::ScanNodes, "reading", static_cast<uint32_t>(i + 1U), static_cast<uint32_t>(hitCount));
+  }
+
+  emitProgress(request.sequence, Command::ScanNodes, "done", completed, lastNode);
+  return Result::Ok;
 }
 
 Result processReconfigure(const Request& request) {
@@ -1584,6 +2332,10 @@ Result processReconfigure(const Request& request) {
   g_baudRate = request.data.reconfigure.baudRate;
   g_txPin = request.data.reconfigure.txPin;
   g_rxPin = request.data.reconfigure.rxPin;
+  g_taskConfig.nodeId = g_nodeId;
+  g_taskConfig.baudRate = g_baudRate;
+  g_taskConfig.txPin = g_txPin;
+  g_taskConfig.rxPin = g_rxPin;
   memset(g_serial, 0, sizeof(g_serial));
   g_jsonFileName[0] = '\0';
   g_lastStartupAttempt = 0;
@@ -1632,6 +2384,12 @@ Result processComplexRequest(const Request& request) {
     case Command::GetUpdateStatus:
       emitStatusResponse(request);
       return Result::Ok;
+    case Command::GetSerial:
+      return processGetSerial(request);
+    case Command::GetValueById:
+      return processGetValueById(request);
+    case Command::ScanNodes:
+      return processScanNodes(request);
     case Command::DownloadSchemaJson:
       return processDownloadSchemaJson(request);
     case Command::ReadLiveSnapshot:
@@ -1677,10 +2435,11 @@ void acceptRequest(const Request& request) {
 }
 
 void taskMain(void*) {
+  resetRuntimeState();
   setTaskState(TaskState::Stopped);
   updateCachedStatus();
 
-  for (;;) {
+  while (!g_stopRequested) {
     bool didWork = false;
 
     if (!g_hasPendingComplex) {
@@ -1724,7 +2483,29 @@ void taskMain(void*) {
 
       receiveAndProcessFrame(0);
     }
+
+    maybeRefreshTaskStats();
   }
+
+  cancelSimpleRequests(Result::NotReady);
+  if (g_hasPendingComplex) {
+    emitTerminal(g_pendingComplexRequest, Result::NotReady);
+    g_hasPendingComplex = false;
+    g_pendingComplexRequest = {};
+  }
+
+  if (g_updateFile) {
+    g_updateFile.close();
+  }
+  g_updateState = UpdateState::Idle;
+  shutdownDriver();
+  setTaskState(TaskState::Stopped);
+  updateCachedStatus();
+  g_taskHandle = nullptr;
+  if (g_taskStoppedSemaphore != nullptr) {
+    xSemaphoreGive(g_taskStoppedSemaphore);
+  }
+  vTaskDelete(nullptr);
 }
 
 } // namespace
@@ -1736,24 +2517,139 @@ uint32_t AllocateSequence() {
   return sequence;
 }
 
+bool StartTask(const sdo_task_config& requestedConfig) {
+  sdo_task_config config = requestedConfig;
+  const sdo_task_config defaults = defaultTaskConfig();
+  config.requestQueueLength = sanitizeQueueLength(config.requestQueueLength, defaults.requestQueueLength);
+  config.responseQueueLength = sanitizeQueueLength(config.responseQueueLength, defaults.responseQueueLength);
+  config.twaiTxQueueLength = sanitizeQueueLength(config.twaiTxQueueLength, defaults.twaiTxQueueLength);
+  config.twaiRxQueueLength = sanitizeQueueLength(config.twaiRxQueueLength, defaults.twaiRxQueueLength);
+  config.taskStackWords = sanitizeQueueLength(config.taskStackWords, defaults.taskStackWords);
+  config.taskPriority = (config.taskPriority == 0U) ? defaults.taskPriority : config.taskPriority;
+  config.maxActiveRequests = sanitizeMaxActiveRequests(config.maxActiveRequests);
+
+  if (g_taskHandle != nullptr) {
+    config.requestQueueLength = g_taskConfig.requestQueueLength;
+    config.responseQueueLength = g_taskConfig.responseQueueLength;
+    config.twaiTxQueueLength = g_taskConfig.twaiTxQueueLength;
+    config.twaiRxQueueLength = g_taskConfig.twaiRxQueueLength;
+    config.taskStackWords = g_taskConfig.taskStackWords;
+    config.taskPriority = g_taskConfig.taskPriority;
+  }
+
+  g_taskConfig = config;
+  g_activeRequestLimit = sanitizeMaxActiveRequests(g_taskConfig.maxActiveRequests);
+  updateCachedStatus();
+
+  if (!StartTask()) {
+    return false;
+  }
+
+  return Reconfigure(config.nodeId, config.baudRate, config.txPin, config.rxPin);
+}
+
 bool StartTask() {
   if (g_taskHandle != nullptr) {
     return true;
   }
 
-  g_requestQueue = xQueueCreate(REQUEST_QUEUE_LENGTH, sizeof(Request));
-  g_responseQueue = xQueueCreate(RESPONSE_QUEUE_LENGTH, sizeof(Response));
+  if (g_taskConfig.requestQueueLength == 0U) {
+    g_taskConfig = defaultTaskConfig();
+  }
+  g_activeRequestLimit = sanitizeMaxActiveRequests(g_taskConfig.maxActiveRequests);
+  g_stopRequested = false;
+
+  g_requestQueue = xQueueCreate(g_taskConfig.requestQueueLength, sizeof(Request));
+  g_responseQueue = xQueueCreate(g_taskConfig.responseQueueLength, sizeof(Response));
   g_apiMutex = xSemaphoreCreateMutex();
+  g_taskStoppedSemaphore = xSemaphoreCreateBinary();
 
-  if ((g_requestQueue == nullptr) || (g_responseQueue == nullptr) || (g_apiMutex == nullptr)) {
+  if ((g_requestQueue == nullptr) || (g_responseQueue == nullptr) || (g_apiMutex == nullptr) || (g_taskStoppedSemaphore == nullptr)) {
+    if (g_requestQueue != nullptr) {
+      vQueueDelete(g_requestQueue);
+      g_requestQueue = nullptr;
+    }
+    if (g_responseQueue != nullptr) {
+      vQueueDelete(g_responseQueue);
+      g_responseQueue = nullptr;
+    }
+    if (g_apiMutex != nullptr) {
+      vSemaphoreDelete(g_apiMutex);
+      g_apiMutex = nullptr;
+    }
+    if (g_taskStoppedSemaphore != nullptr) {
+      vSemaphoreDelete(g_taskStoppedSemaphore);
+      g_taskStoppedSemaphore = nullptr;
+    }
     return false;
   }
 
-  if (xTaskCreate(taskMain, "oi_can_task", 12288, nullptr, 2, &g_taskHandle) != pdPASS) {
+  if (xTaskCreate(taskMain,
+                  "oi_can_task",
+                  g_taskConfig.taskStackWords,
+                  nullptr,
+                  static_cast<UBaseType_t>(g_taskConfig.taskPriority),
+                  &g_taskHandle) != pdPASS) {
     g_taskHandle = nullptr;
+    vQueueDelete(g_requestQueue);
+    vQueueDelete(g_responseQueue);
+    vSemaphoreDelete(g_apiMutex);
+    vSemaphoreDelete(g_taskStoppedSemaphore);
+    g_requestQueue = nullptr;
+    g_responseQueue = nullptr;
+    g_apiMutex = nullptr;
+    g_taskStoppedSemaphore = nullptr;
     return false;
   }
 
+  return true;
+}
+
+bool StopTask(TickType_t timeoutTicks) {
+  if (g_taskHandle == nullptr) {
+    g_stopRequested = false;
+    shutdownDriver();
+    setTaskState(TaskState::Stopped);
+    updateCachedStatus();
+    return true;
+  }
+
+  if ((g_apiMutex != nullptr) && (xSemaphoreTake(g_apiMutex, timeoutTicks) != pdTRUE)) {
+    return false;
+  }
+
+  g_stopRequested = true;
+  const bool stopped =
+      (g_taskStoppedSemaphore != nullptr) && (xSemaphoreTake(g_taskStoppedSemaphore, timeoutTicks) == pdTRUE);
+
+  if (!stopped) {
+    if (g_apiMutex != nullptr) {
+      xSemaphoreGive(g_apiMutex);
+    }
+    return false;
+  }
+
+  if (g_requestQueue != nullptr) {
+    vQueueDelete(g_requestQueue);
+    g_requestQueue = nullptr;
+  }
+
+  if (g_responseQueue != nullptr) {
+    vQueueDelete(g_responseQueue);
+    g_responseQueue = nullptr;
+  }
+
+  if (g_apiMutex != nullptr) {
+    vSemaphoreDelete(g_apiMutex);
+    g_apiMutex = nullptr;
+  }
+
+  if (g_taskStoppedSemaphore != nullptr) {
+    vSemaphoreDelete(g_taskStoppedSemaphore);
+    g_taskStoppedSemaphore = nullptr;
+  }
+
+  g_stopRequested = false;
   return true;
 }
 
@@ -1772,7 +2668,7 @@ void UnlockApi() {
 }
 
 bool Submit(const Request& request, TickType_t sendTimeoutTicks) {
-  if ((g_requestQueue == nullptr) || (request.sequence == 0U)) {
+  if ((g_requestQueue == nullptr) || (request.sequence == 0U) || g_stopRequested) {
     return false;
   }
 
@@ -1880,6 +2776,20 @@ Result GetStatus(StatusPayload& status) {
 bool GetCachedStatus(StatusPayload& status) {
   portENTER_CRITICAL(&g_stateLock);
   status = g_cachedStatus;
+  portEXIT_CRITICAL(&g_stateLock);
+  return true;
+}
+
+bool GetTaskConfig(sdo_task_config& config) {
+  portENTER_CRITICAL(&g_stateLock);
+  config = g_taskConfig;
+  portEXIT_CRITICAL(&g_stateLock);
+  return true;
+}
+
+bool GetTaskStats(sdo_task_stats& stats) {
+  portENTER_CRITICAL(&g_stateLock);
+  stats = g_cachedTaskStats;
   portEXIT_CRITICAL(&g_stateLock);
   return true;
 }

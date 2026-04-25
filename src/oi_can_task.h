@@ -35,6 +35,9 @@ constexpr size_t kProgressStageLength = 24;
 enum class Command : uint8_t {
   Reconfigure,
   GetStatus,
+  GetSerial,
+  ScanNodes,
+  GetValueById,
   DownloadSchemaJson,
   ReadLiveSnapshot,
   ReadCanMap,
@@ -70,14 +73,80 @@ enum class TaskState : uint8_t {
   Error
 };
 
+enum class CanBusState : uint8_t {
+  Stopped,
+  Running,
+  BusOff,
+  Recovering,
+  Unknown
+};
+
 enum class ResponseKind : uint8_t {
   Accepted,
   Progress,
   Value,
   MappingItem,
   FileReady,
+  Serial,
   Completed,
   Failed
+};
+
+struct sdo_task_config {
+  uint8_t nodeId = 1;
+  uint8_t baudRate = 2;
+  int txPin = -1;
+  int rxPin = -1;
+  uint16_t requestQueueLength = 24;
+  uint16_t responseQueueLength = 96;
+  uint16_t twaiTxQueueLength = 30;
+  uint16_t twaiRxQueueLength = 30;
+  uint16_t taskStackWords = 12288;
+  uint8_t taskPriority = 2;
+  uint8_t maxActiveRequests = 4;
+};
+
+struct sdo_task_stats {
+  bool taskRunning;
+  bool driverInstalled;
+  bool traceEnabled;
+  bool schemaAvailable;
+  bool errorPassive;
+  TaskState taskState;
+  CanBusState canState;
+  uint8_t nodeId;
+  uint8_t baudRate;
+  int txPin;
+  int rxPin;
+  uint8_t maxActiveRequests;
+  uint16_t requestQueueUsed;
+  uint16_t requestQueueCapacity;
+  uint16_t responseQueueUsed;
+  uint16_t responseQueueCapacity;
+  uint16_t queuedRequests;
+  uint16_t activeRequests;
+  uint32_t uptimeMs;
+  uint32_t canFramesTx;
+  uint32_t canFramesRx;
+  uint32_t canBytesTx;
+  uint32_t canBytesRx;
+  uint32_t canRepliesReceived;
+  float currentBusLoadKbps;
+  float currentBusLoadPercent;
+  uint32_t requestsAccepted;
+  uint32_t requestsCompleted;
+  uint32_t requestsFailed;
+  uint32_t requestTimeouts;
+  uint32_t responsesEmitted;
+  uint32_t txErrorCounter;
+  uint32_t rxErrorCounter;
+  uint32_t msgsToTx;
+  uint32_t msgsToRx;
+  uint32_t txFailedCount;
+  uint32_t rxMissedCount;
+  uint32_t rxOverrunCount;
+  uint32_t arbLostCount;
+  uint32_t busErrorCount;
 };
 
 struct StatusPayload {
@@ -100,6 +169,7 @@ struct ProgressPayload {
 };
 
 struct ValuePayload {
+  uint8_t nodeId;
   char name[kNameLength];
   uint16_t paramId;
   float value;
@@ -123,6 +193,11 @@ struct FilePayload {
   uint32_t size;
 };
 
+struct SerialPayload {
+  uint8_t nodeId;
+  uint32_t words[4];
+};
+
 struct Request {
   uint32_t sequence;
   Command command;
@@ -138,11 +213,29 @@ struct Request {
 
     struct {
       bool forceRedownload;
+      uint8_t nodeId;
     } downloadSchemaJson;
+
+    struct {
+      uint8_t nodeId;
+    } getSerial;
+
+    struct {
+      uint8_t lastNode;
+    } scanNodes;
+
+    struct {
+      uint8_t nodeId;
+      uint16_t paramId;
+    } getValueById;
 
     struct {
       bool includeMetadata;
     } readLiveSnapshot;
+
+    struct {
+      uint8_t nodeId;
+    } readCanMap;
 
     struct {
       char name[kNameLength];
@@ -155,6 +248,8 @@ struct Request {
 
     struct {
       uint16_t samples;
+      uint16_t sampleRateHz;
+      bool allValues;
       char namesCsv[kNamesCsvLength];
     } streamValues;
 
@@ -190,13 +285,16 @@ struct Response {
     ValuePayload value;
     MappingItemPayload mappingItem;
     FilePayload file;
+    SerialPayload serial;
   } data;
 };
 
 using ResponseCallback = bool (*)(const Response& event, void* context);
 
 uint32_t AllocateSequence();
+bool StartTask(const sdo_task_config& config);
 bool StartTask();
+bool StopTask(TickType_t timeoutTicks = pdMS_TO_TICKS(2000));
 bool LockApi(TickType_t timeoutTicks = pdMS_TO_TICKS(50));
 void UnlockApi();
 bool Submit(const Request& request, TickType_t sendTimeoutTicks = pdMS_TO_TICKS(50));
@@ -211,6 +309,8 @@ bool GetTraceEnabled();
 bool Reconfigure(uint8_t nodeId, uint8_t baudRate, int txPin, int rxPin);
 Result GetStatus(StatusPayload& status);
 bool GetCachedStatus(StatusPayload& status);
+bool GetTaskConfig(sdo_task_config& config);
+bool GetTaskStats(sdo_task_stats& stats);
 bool GetSchemaFileName(char* path, size_t pathSize);
 uint8_t GetNodeId();
 uint8_t GetBaudRate();
