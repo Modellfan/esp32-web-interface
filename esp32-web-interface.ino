@@ -59,6 +59,7 @@
 #include <time.h>
 #include "driver/uart.h"
 #include "src/oi_can.h"
+#include "src/debug_console.h"
 #include "src/config.h"
 
 #define DBG_OUTPUT_PORT Serial
@@ -851,6 +852,8 @@ void setup(void){
   server.begin();
 
   MDNS.addService("http", "tcp", 80);
+
+  DebugConsole::Begin();
 }
 
 void binaryLoggingStart()
@@ -916,6 +919,7 @@ void loop(void){
   // note: ArduinoOTA.handle() calls MDNS.update();
   server.handleClient();
   ArduinoOTA.handle();
+  DebugConsole::Loop();
 
   OICan::Loop();
 

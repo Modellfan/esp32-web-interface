@@ -1,7 +1,7 @@
 /*
  * This file is part of the esp32 web interface
  *
- * Copyright (C) 2023 Johannes Huebner <dev@johanneshuebner.com>
+ * Copyright (C) 2024
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -17,968 +17,328 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  */
-#include "driver/gpio.h"
-#include "driver/twai.h"
-#include <FS.h>
-#include <SPIFFS.h>
-#include <ArduinoJson.h>
 #include "oi_can.h"
 
-#define DBG_OUTPUT_PORT Serial
-#define SDO_REQUEST_DOWNLOAD  (1 << 5)
-#define SDO_REQUEST_UPLOAD    (2 << 5)
-#define SDO_REQUEST_SEGMENT   (3 << 5)
-#define SDO_TOGGLE_BIT        (1 << 4)
-#define SDO_RESPONSE_UPLOAD   (2 << 5)
-#define SDO_RESPONSE_DOWNLOAD (3 << 5)
-#define SDO_EXPEDITED         (1 << 1)
-#define SDO_SIZE_SPECIFIED    (1)
-#define SDO_WRITE             (SDO_REQUEST_DOWNLOAD | SDO_EXPEDITED | SDO_SIZE_SPECIFIED)
-#define SDO_READ              SDO_REQUEST_UPLOAD
-#define SDO_ABORT             0x80
-#define SDO_WRITE_REPLY       SDO_RESPONSE_DOWNLOAD
-#define SDO_READ_REPLY        (SDO_RESPONSE_UPLOAD | SDO_EXPEDITED | SDO_SIZE_SPECIFIED)
-#define SDO_ERR_INVIDX        0x06020000
-#define SDO_ERR_RANGE         0x06090030
-#define SDO_ERR_GENERAL       0x08000000
+#include <ArduinoJson.h>
+#include <FS.h>
+#include <SPIFFS.h>
+#include <cstring>
 
-#define SDO_INDEX_PARAMS      0x2000
-#define SDO_INDEX_PARAM_UID   0x2100
-#define SDO_INDEX_MAP_TX      0x3000
-#define SDO_INDEX_MAP_RX      0x3001
-#define SDO_INDEX_MAP_RD      0x3100
-#define SDO_INDEX_SERIAL      0x5000
-#define SDO_INDEX_STRINGS     0x5001
-#define SDO_INDEX_COMMANDS    0x5002
-#define SDO_CMD_SAVE          0
-#define SDO_CMD_LOAD          1
-#define SDO_CMD_RESET         2
-#define SDO_CMD_DEFAULTS      3
-#define SDO_CMD_START         4
-#define SDO_CMD_STOP          5
+#include "oi_can_task.h"
 
 namespace OICan {
 
-enum State { IDLE, ERROR, OBTAINSERIAL, OBTAIN_JSON };
-enum UpdState { UPD_IDLE, SEND_MAGIC, SEND_SIZE, SEND_PAGE, CHECK_CRC, REQUEST_JSON };
+namespace {
 
-static uint8_t _nodeId;
-static BaudRate baudRate;
-static State state;
-static UpdState updstate;
-static uint32_t serial[4]; //contains id sum as well
-static char jsonFileName[20];
-static twai_message_t tx_frame;
-static File updateFile;
-static int currentPage = 0;
-static const size_t PAGE_SIZE_BYTES = 1024;
-static int retries = 0;
-static uint32_t lastStartupRequestMs = 0;
-static int startupRetryCount = 0;
-
-constexpr uint32_t STARTUP_RETRY_INTERVAL_MS = 1000;
-constexpr int STARTUP_RETRY_LOG_INTERVAL = 20;
-
-static uint32_t baudRateToBitsPerSecond(BaudRate baud) {
-  switch (baud) {
-    case Baud125k:
-      return 125000;
-    case Baud250k:
-      return 250000;
-    case Baud500k:
-      return 500000;
-  }
-
-  return 0;
+uint8_t toTaskBaudRate(BaudRate baudRate) {
+  return static_cast<uint8_t>(baudRate);
 }
 
-#ifdef DEBUG_CAN
-static void logCanFrame(const char* direction, const twai_message_t* frame) {
-  DBG_OUTPUT_PORT.printf("CAN %s id=0x%08" PRIX32 " dlc=%u%s%s data",
-                         direction,
-                         frame->identifier,
-                         frame->data_length_code,
-                         frame->extd ? " ext" : "",
-                         frame->rtr ? " rtr" : "");
-
-  if (!frame->rtr) {
-    for (uint8_t i = 0; i < frame->data_length_code && i < sizeof(frame->data); i++) {
-      DBG_OUTPUT_PORT.printf(" %02X", frame->data[i]);
-    }
-  }
-
-  DBG_OUTPUT_PORT.print("\r\n");
-}
-#endif
-
-static esp_err_t transmitFrame(const twai_message_t* frame, TickType_t timeoutTicks) {
-  esp_err_t result = twai_transmit(frame, timeoutTicks);
-
-#ifdef DEBUG_CAN
-  if (result == ESP_OK) {
-    logCanFrame("TX", frame);
-  }
-  else {
-    DBG_OUTPUT_PORT.printf("CAN TX failed err=%d id=0x%08" PRIX32 "\r\n", result, frame->identifier);
-  }
-#endif
-
-  return result;
-}
-
-static esp_err_t receiveFrame(twai_message_t* frame, TickType_t timeoutTicks) {
-  esp_err_t result = twai_receive(frame, timeoutTicks);
-
-#ifdef DEBUG_CAN
-  if (result == ESP_OK) {
-    logCanFrame("RX", frame);
-  }
-#endif
-
-  return result;
-}
-
-constexpr TickType_t SDO_READ_TIMEOUT_TICKS = pdMS_TO_TICKS(20);
-constexpr TickType_t SDO_WRITE_TIMEOUT_TICKS = pdMS_TO_TICKS(100);
-
-static void drainReceiveQueue() {
-  twai_message_t frame;
-
-  while (receiveFrame(&frame, 0) == ESP_OK) {
-#ifdef DEBUG_CAN
-    DBG_OUTPUT_PORT.printf("Discarded queued CAN frame id=0x%08" PRIX32 "\r\n", frame.identifier);
-#endif
-  }
-}
-
-static bool isExpectedSdoReply(const twai_message_t* frame, uint16_t index, uint8_t subIndex, uint8_t expectedCommand) {
-  if (frame->identifier != (0x580 | _nodeId)) {
-    return false;
-  }
-
-  if ((frame->data[1] | (frame->data[2] << 8)) != index || frame->data[3] != subIndex) {
-    return false;
-  }
-
-  if (frame->data[0] == SDO_ABORT) {
-    return true;
-  }
-
-  return frame->data[0] == expectedCommand;
-}
-
-static bool waitForSdoReply(twai_message_t* frame, uint16_t index, uint8_t subIndex, uint8_t expectedCommand, TickType_t timeoutTicks) {
-  TickType_t startTicks = xTaskGetTickCount();
-
-  while ((xTaskGetTickCount() - startTicks) < timeoutTicks) {
-    TickType_t elapsedTicks = xTaskGetTickCount() - startTicks;
-    TickType_t remainingTicks = timeoutTicks - elapsedTicks;
-    if (remainingTicks == 0) {
-      break;
-    }
-
-    if (receiveFrame(frame, remainingTicks) != ESP_OK) {
-      return false;
-    }
-
-    if (isExpectedSdoReply(frame, index, subIndex, expectedCommand)) {
-      return true;
-    }
-
-#ifdef DEBUG_CAN
-    DBG_OUTPUT_PORT.printf("Ignoring unexpected CAN reply id=0x%08" PRIX32 " idx=0x%04X sub=0x%02X cmd=0x%02X while waiting for idx=0x%04X sub=0x%02X cmd=0x%02X\r\n",
-                           frame->identifier,
-                           frame->data[1] | (frame->data[2] << 8),
-                           frame->data[3],
-                           frame->data[0],
-                           index,
-                           subIndex,
-                           expectedCommand);
-#endif
-  }
-
-  return false;
-}
-
-static void requestSdoElement(uint16_t index, uint8_t subIndex) {
-  tx_frame.extd = false;
-  tx_frame.identifier = 0x600 | _nodeId;
-  tx_frame.data_length_code = 8;
-  tx_frame.data[0] = SDO_READ;
-  tx_frame.data[1] = index & 0xFF;
-  tx_frame.data[2] = index >> 8;
-  tx_frame.data[3] = subIndex;
-  tx_frame.data[4] = 0;
-  tx_frame.data[5] = 0;
-  tx_frame.data[6] = 0;
-  tx_frame.data[7] = 0;
-
-  transmitFrame(&tx_frame, pdMS_TO_TICKS(10));
-}
-
-static void setValueSdo(uint16_t index, uint8_t subIndex, uint32_t value) {
-  tx_frame.extd = false;
-  tx_frame.identifier = 0x600 | _nodeId;
-  tx_frame.data_length_code = 8;
-  tx_frame.data[0] = SDO_WRITE;
-  tx_frame.data[1] = index & 0xFF;
-  tx_frame.data[2] = index >> 8;
-  tx_frame.data[3] = subIndex;
-  *(uint32_t*)&tx_frame.data[4] = value;
-
-  transmitFrame(&tx_frame, pdMS_TO_TICKS(10));
-}
-
-static int getId(String name) {
-  JsonDocument doc;
-  JsonDocument filter;
-
-  File file = SPIFFS.open(jsonFileName, "r");
-  filter[name]["id"] = true;
-  deserializeJson(doc, file, DeserializationOption::Filter(filter));
-  file.close();
-
-  return doc[name]["id"].as<int>();
-}
-
-static void requestNextSegment(bool toggleBit) {
-  tx_frame.extd = false;
-  tx_frame.identifier = 0x600 | _nodeId;
-  tx_frame.data_length_code = 8;
-  tx_frame.data[0] = SDO_REQUEST_SEGMENT | toggleBit << 4;
-  tx_frame.data[1] = 0;
-  tx_frame.data[2] = 0;
-  tx_frame.data[3] = 0;
-  tx_frame.data[4] = 0;
-  tx_frame.data[5] = 0;
-  tx_frame.data[6] = 0;
-  tx_frame.data[7] = 0;
-
-  transmitFrame(&tx_frame, pdMS_TO_TICKS(10));
-}
-
-static void handleSdoResponse(twai_message_t *rxframe) {
-  static bool toggleBit = false;
-  static File file;
-
-  if (rxframe->data[0] == SDO_ABORT) { //SDO abort
-    state = OBTAINSERIAL;
-    requestSdoElement(SDO_INDEX_SERIAL, 0);
-    lastStartupRequestMs = millis();
-    startupRetryCount++;
-    DBG_OUTPUT_PORT.println("SDO abort while obtaining serial number, retrying");
-    return;
-  }
-
-  switch (state) {
-    case OBTAINSERIAL:
-      if ((rxframe->data[1] | rxframe->data[2] << 8) == SDO_INDEX_SERIAL && rxframe->data[3] < 4) {
-        serial[rxframe->data[3]] = *(uint32_t*)&rxframe->data[4];
-
-        if (rxframe->data[3] < 3) {
-          requestSdoElement(SDO_INDEX_SERIAL, rxframe->data[3] + 1);
-        }
-        else {
-          sprintf(jsonFileName, "/%" PRIx32 ".json", serial[3]);
-          DBG_OUTPUT_PORT.printf("Got Serial Number %" PRIX32 ":%" PRIX32 ":%" PRIX32 ":%" PRIX32 "\r\n", serial[0], serial[1], serial[2], serial[3]);
-
-          if (SPIFFS.exists(jsonFileName)) {
-            state = IDLE;
-            startupRetryCount = 0;
-            DBG_OUTPUT_PORT.println("json file already downloaded");
-          }
-          else {
-            state = OBTAIN_JSON;
-            DBG_OUTPUT_PORT.printf("Downloading json to %s\r\n", jsonFileName);
-            file = SPIFFS.open(jsonFileName, "w+");
-            requestSdoElement(SDO_INDEX_STRINGS, 0); //Initiates JSON upload
-          }
-        }
-      }
-      break;
-    case OBTAIN_JSON:
-      //Receiving last segment
-      if ((rxframe->data[0] & SDO_SIZE_SPECIFIED) && (rxframe->data[0] & SDO_READ) == 0) {
-        int size = 7 - ((rxframe->data[0] >> 1) & 0x7);
-        file.write(&rxframe->data[1], size);
-        file.close();
-        DBG_OUTPUT_PORT.println("Download complete");
-        state = IDLE;
-        startupRetryCount = 0;
-      }
-      //Receiving a segment
-      else if (rxframe->data[0] == (toggleBit << 4) && (rxframe->data[0] & SDO_READ) == 0) {
-        file.write(&rxframe->data[1], 7);
-        toggleBit = !toggleBit;
-        requestNextSegment(toggleBit);
-      }
-      //Request first segment
-      else if ((rxframe->data[0] & SDO_READ) == SDO_READ) {
-        requestNextSegment(toggleBit);
-      }
-
-      break;
-    case ERROR:
-      // Do not exit this state
-      break;
-    case IDLE:
-      // Do not exit this state
-      break;
-  }
-}
-
-static uint32_t crc32_word(uint32_t Crc, uint32_t Data)
-{
-  int i;
-
-  Crc = Crc ^ Data;
-
-  for(i=0; i<32; i++)
-    if (Crc & 0x80000000)
-      Crc = (Crc << 1) ^ 0x04C11DB7; // Polynomial used in STM32
-    else
-      Crc = (Crc << 1);
-
-  return(Crc);
-}
-
-static void handleUpdate(twai_message_t *rxframe) {
-  static int currentByte = 0;
-  static uint32_t crc;
-
-  switch (updstate) {
-    case SEND_MAGIC:
-      if (rxframe->data[0] == 0x33) {
-        tx_frame.identifier = 0x7dd;
-        tx_frame.data_length_code = 4;
-
-        //For now just reflect ID
-        tx_frame.data[0] = rxframe->data[4];
-        tx_frame.data[1] = rxframe->data[5];
-        tx_frame.data[2] = rxframe->data[6];
-        tx_frame.data[3] = rxframe->data[7];
-        updstate = SEND_SIZE;
-        DBG_OUTPUT_PORT.printf("Sending ID %" PRIu32 "\r\n", *(uint32_t*)tx_frame.data);
-        transmitFrame(&tx_frame, pdMS_TO_TICKS(10));
-
-        if (rxframe->data[1] < 1) //boot loader with timing quirk, wait 100 ms
-          delay(100);
-      }
-      break;
-    case SEND_SIZE:
-      if (rxframe->data[0] == 'S') {
-        tx_frame.identifier = 0x7dd;
-        tx_frame.data_length_code = 1;
-
-        tx_frame.data[0] = (updateFile.size() + PAGE_SIZE_BYTES - 1) / PAGE_SIZE_BYTES;
-        updstate = SEND_PAGE;
-        crc = 0xFFFFFFFF;
-        currentByte = 0;
-        currentPage = 0;
-        DBG_OUTPUT_PORT.printf("Sending size %u\r\n", tx_frame.data[0]);
-        transmitFrame(&tx_frame, pdMS_TO_TICKS(10));
-      }
-      break;
-    case SEND_PAGE:
-      if (rxframe->data[0] == 'P') {
-        char buffer[8];
-        size_t bytesRead = 0;
-
-        if (currentByte < updateFile.size()) {
-          updateFile.seek(currentByte);
-          bytesRead = updateFile.readBytes(buffer, sizeof(buffer));
-        }
-
-        while (bytesRead < 8)
-          buffer[bytesRead++] = 0xff;
-
-        currentByte += bytesRead;
-        crc = crc32_word(crc, *(uint32_t*)&buffer[0]);
-        crc = crc32_word(crc, *(uint32_t*)&buffer[4]);
-
-        tx_frame.identifier = 0x7dd;
-        tx_frame.data_length_code = 8;
-        tx_frame.data[0] = buffer[0];
-        tx_frame.data[1] = buffer[1];
-        tx_frame.data[2] = buffer[2];
-        tx_frame.data[3] = buffer[3];
-        tx_frame.data[4] = buffer[4];
-        tx_frame.data[5] = buffer[5];
-        tx_frame.data[6] = buffer[6];
-        tx_frame.data[7] = buffer[7];
-
-        updstate = SEND_PAGE;
-        transmitFrame(&tx_frame, pdMS_TO_TICKS(10));
-      }
-      else if (rxframe->data[0] == 'C') {
-        tx_frame.identifier = 0x7dd;
-        tx_frame.data_length_code = 4;
-        tx_frame.data[0] = crc & 0xFF;
-        tx_frame.data[1] = (crc >> 8) & 0xFF;
-        tx_frame.data[2] = (crc >> 16) & 0xFF;
-        tx_frame.data[3] = (crc >> 24) & 0xFF;
-
-        updstate = CHECK_CRC;
-        transmitFrame(&tx_frame, pdMS_TO_TICKS(10));
-      }
-      break;
-    case CHECK_CRC:
-      crc = 0xFFFFFFFF;
-      DBG_OUTPUT_PORT.printf("Sent bytes %u-%u... ", currentPage * PAGE_SIZE_BYTES, currentByte);
-      if (rxframe->data[0] == 'P') {
-        updstate = SEND_PAGE;
-        currentPage++;
-        DBG_OUTPUT_PORT.printf("CRC Good\r\n");
-        handleUpdate(rxframe);
-      }
-      else if (rxframe->data[0] == 'E') {
-        updstate = SEND_PAGE;
-        currentByte = currentPage * PAGE_SIZE_BYTES;
-        DBG_OUTPUT_PORT.printf("CRC Error\r\n");
-        handleUpdate(rxframe);
-      }
-      else if (rxframe->data[0] == 'D') {
-        updstate = REQUEST_JSON;
-        state = OBTAINSERIAL;
-        retries = 50;
-        updateFile.close();
-        DBG_OUTPUT_PORT.printf("Done!\r\n");
-      }
-      break;
-    case REQUEST_JSON:
-      // Do not exit this state
-      break;
-    case UPD_IDLE:
-      // Do not exit this state
-      break;
-  }
-}
-
-int StartUpdate(String fileName) {
-  updateFile = SPIFFS.open(fileName, "r");
-  //Reset host processor
-  setValueSdo(SDO_INDEX_COMMANDS, SDO_CMD_RESET, 1U);
-  updstate = SEND_MAGIC;
-  currentPage = 0;
-  DBG_OUTPUT_PORT.println("Starting Update");
-
-  return (updateFile.size() + PAGE_SIZE_BYTES - 1) / PAGE_SIZE_BYTES;
-}
-
-int GetCurrentUpdatePage() {
-  return currentPage;
-}
-
-bool SendJson(WebServer& server) {
-  if (state != IDLE) {
-#ifdef DEBUG_CAN
-    DBG_OUTPUT_PORT.printf("SendJson refused state=%d\r\n", state);
-#endif
-    return false;
-  }
-
-  JsonDocument doc;
-  twai_message_t rxframe;
-
-  File file = SPIFFS.open(jsonFileName, "r");
-  auto result = deserializeJson(doc, file);
-  file.close();
-
-  if (result != DeserializationError::Ok) {
-    SPIFFS.remove(jsonFileName); //if json file is invalid, remove it and trigger re-download
-    updstate = REQUEST_JSON;
-    retries = 50;
-    DBG_OUTPUT_PORT.println("JSON file invalid, re-downloading");
-    return false;
-  }
-
-  JsonObject root = doc.as<JsonObject>();
-  int failed = 0;
-  int succeeded = 0;
-  int requested = 0;
-
-  auto client = server.client();
-  drainReceiveQueue();
-
-  for (JsonPair kv : root) {
-    if (!client.connected()) {
-#ifdef DEBUG_CAN
-      DBG_OUTPUT_PORT.println("SendJson aborted client disconnected");
-#endif
-      return false;
-    }
-
-    int id = kv.value()["id"].as<int>();
-
-    if (id > 0) {
-      requested++;
-      const uint16_t index = SDO_INDEX_PARAM_UID | (id >> 8);
-      const uint8_t subIndex = id & 0xFF;
-      requestSdoElement(index, subIndex);
-
-      if (waitForSdoReply(&rxframe, index, subIndex, SDO_READ_REPLY, SDO_READ_TIMEOUT_TICKS) &&
-          rxframe.data[0] != SDO_ABORT) {
-        kv.value()["value"] = ((double)*(int32_t*)&rxframe.data[4]) / 32;
-        succeeded++;
-      } else {
-        failed++;
-#ifdef DEBUG_CAN
-        DBG_OUTPUT_PORT.printf("SendJson miss param=0x%04X\r\n", id);
-#endif
-      }
-    }
-  }
-
-  bool ok = succeeded > 0;
-
-#ifdef DEBUG_CAN
-  DBG_OUTPUT_PORT.printf("SendJson requested=%d ok=%d failed=%d result=%s\r\n",
-                         requested,
-                         succeeded,
-                         failed,
-                         ok ? "ok" : "fail");
-#endif
-
-  if (ok && client.connected()) {
-    server.setContentLength(measureJson(doc));
-    server.send(200, "application/json", "");
-    serializeJson(doc, client);
-  }
-  return ok;
-}
-
-void SendCanMapping(WebServer& server) {
-  enum ReqMapStt { START, COBID, DATAPOSLEN, GAINOFS, DONE };
-
-  auto client = server.client();
-  twai_message_t rxframe;
-  int index = SDO_INDEX_MAP_RD, subIndex = 0;
-  int cobid = 0, pos = 0, len = 0, paramid = 0;
-  bool rx = false;
-  String result;
-  ReqMapStt reqMapStt = START;
-
-  JsonDocument doc;
-  drainReceiveQueue();
-
-  while (DONE != reqMapStt) {
-    if (!client.connected()) {
-#ifdef DEBUG_CAN
-      DBG_OUTPUT_PORT.println("SendCanMapping aborted client disconnected");
-#endif
-      return;
-    }
-
-    switch (reqMapStt) {
-    case START:
-      requestSdoElement(index, 0); //request COB ID
-      reqMapStt = COBID;
-      cobid = 0;
-      pos = 0;
-      len = 0;
-      paramid = 0;
-      break;
-    case COBID:
-      if (waitForSdoReply(&rxframe, index, 0, SDO_READ_REPLY, SDO_READ_TIMEOUT_TICKS)) {
-        if (rxframe.data[0] != SDO_ABORT) {
-          cobid = *(int32_t*)&rxframe.data[4]; //convert bytes to word
-          subIndex++;
-          requestSdoElement(index, subIndex); //request parameter id, position and length
-          reqMapStt = DATAPOSLEN;
-        }
-        else if (!rx) { //after receiving tx item collect rx items
-          rx = true;
-          index = SDO_INDEX_MAP_RD + 0x80;
-          reqMapStt = START;
-          DBG_OUTPUT_PORT.println("Getting RX items");
-        }
-        else //no more items, we are done
-          reqMapStt = DONE;
-      }
-      else
-        reqMapStt = DONE; //don't lock up when not receiving
-      break;
-    case DATAPOSLEN:
-      if (waitForSdoReply(&rxframe, index, subIndex, SDO_READ_REPLY, SDO_READ_TIMEOUT_TICKS)) {
-        if (rxframe.data[0] != SDO_ABORT) {
-          paramid = *(uint16_t*)&rxframe.data[4];
-          pos = rxframe.data[6];
-          len = (int8_t)rxframe.data[7];
-          subIndex++;
-          requestSdoElement(index, subIndex); //gain and offset
-          reqMapStt = GAINOFS;
-        }
-        else { //all items of this message collected, move to next message
-          index++;
-          subIndex = 0;
-          reqMapStt = START;
-          DBG_OUTPUT_PORT.println("Mapping received, moving to next");
-        }
-      }
-      else
-        reqMapStt = DONE; //don't lock up when not receiving
-      break;
-    case GAINOFS:
-      if (waitForSdoReply(&rxframe, index, subIndex, SDO_READ_REPLY, SDO_READ_TIMEOUT_TICKS)) {
-        if (rxframe.data[0] != SDO_ABORT) {
-          int32_t gainFixedPoint = ((*(uint32_t*)&rxframe.data[4]) & 0xFFFFFF) << (32-24);
-          gainFixedPoint >>= (32-24);
-          float gain = gainFixedPoint / 1000.0f;
-          int offset = (int8_t)rxframe.data[7];
-          DBG_OUTPUT_PORT.printf("can %s %d %d %d %d %f %d\r\n", rx ? "rx" : "tx", paramid, cobid, pos, len, gain, offset);
-          JsonDocument subdoc;
-          JsonObject object = subdoc.to<JsonObject>();
-          object["isrx"] = rx;
-          object["id"] = cobid;
-          object["paramid"] = paramid;
-          object["position"] = pos;
-          object["length"] = len;
-          object["gain"] = gain;
-          object["offset"] = offset;
-          object["index"] = index;
-          object["subindex"] = subIndex;
-          doc.add(object);
-          subIndex++;
-
-          if (subIndex < 100) { //limit maximum items in case there is a bug ;)
-            requestSdoElement(index, subIndex); //request next item
-            reqMapStt = DATAPOSLEN;
-          }
-          else {
-            reqMapStt = DONE;
-          }
-        }
-        else //should never get here
-          reqMapStt = DONE;
-      }
-      else
-        reqMapStt = DONE; //don't lock up when not receiving
-      break;
-    case DONE:
-      break;
-    }
-  }
-
-  if (client.connected()) {
-    server.setContentLength(measureJson(doc));
-    server.send(200, "application/json", "");
-    serializeJson(doc, client);
-  }
-}
-
-SetResult AddCanMapping(String json) {
-  if (state != IDLE) return CommError;
-
-  JsonDocument doc;
-  twai_message_t rxframe;
-
-  deserializeJson(doc, json);
-
-  if (doc["isrx"].isNull() || doc["id"].isNull() || doc["paramid"].isNull() || doc["position"].isNull() ||
-      doc["length"].isNull() || doc["gain"].isNull() || doc["offset"].isNull()) {
-    DBG_OUTPUT_PORT.println("Add: Missing argument");
-    return UnknownIndex;
-  }
-
-  int index = doc["isrx"] ? SDO_INDEX_MAP_RX : SDO_INDEX_MAP_TX;
-  drainReceiveQueue();
-
-  setValueSdo(index, 0, (uint32_t)doc["id"]); //Send CAN Id
-
-  if (waitForSdoReply(&rxframe, index, 0, SDO_WRITE_REPLY, SDO_WRITE_TIMEOUT_TICKS)) {
-    DBG_OUTPUT_PORT.println("Sent COB Id");
-    setValueSdo(index, 1, doc["paramid"].as<uint32_t>() | (doc["position"].as<uint32_t>() << 16) | (doc["length"].as<int32_t>() << 24)); //data item, position and length
-    if (rxframe.data[0] != SDO_ABORT && waitForSdoReply(&rxframe, index, 1, SDO_WRITE_REPLY, SDO_WRITE_TIMEOUT_TICKS)) {
-      DBG_OUTPUT_PORT.println("Sent position and length");
-      setValueSdo(index, 2, (uint32_t)((int32_t)(doc["gain"].as<double>() * 1000) & 0xFFFFFF) | doc["offset"].as<int32_t>() << 24); //gain and offset
-
-      if (rxframe.data[0] != SDO_ABORT && waitForSdoReply(&rxframe, index, 2, SDO_WRITE_REPLY, SDO_WRITE_TIMEOUT_TICKS)) {
-        if (rxframe.data[0] != SDO_ABORT){
-          DBG_OUTPUT_PORT.println("Sent gain and offset -> map successful");
-          return Ok;
-        }
-      }
-    }
-  }
-
-  DBG_OUTPUT_PORT.println("Mapping failed");
-
-  return CommError;
-}
-
-SetResult RemoveCanMapping(String json){
-  if (state != IDLE) return CommError;
-
-  JsonDocument doc;
-  twai_message_t rxframe;
-
-  deserializeJson(doc, json);
-
-  if (doc["index"].isNull() || doc["subindex"].isNull()) {
-    DBG_OUTPUT_PORT.println("Remove: Missing argument");
-
-    return UnknownIndex;
-  }
-
-  const uint16_t index = doc["index"].as<uint32_t>();
-  const uint8_t subIndex = doc["subindex"].as<uint8_t>();
-  drainReceiveQueue();
-  setValueSdo(index, subIndex, 0U); //Writing 0 to map index removes the mapping
-
-  if (waitForSdoReply(&rxframe, index, subIndex, SDO_WRITE_REPLY, SDO_WRITE_TIMEOUT_TICKS)) {
-    if (rxframe.data[0] != SDO_ABORT){
-      DBG_OUTPUT_PORT.println("Item removed");
+SetResult mapTaskResult(OICanTask::Result result) {
+  switch (result) {
+    case OICanTask::Result::Ok:
       return Ok;
-    }
-    else {
-      DBG_OUTPUT_PORT.println("Invalid item index/subindex");
+    case OICanTask::Result::UnknownIndex:
+    case OICanTask::Result::InvalidRequest:
       return UnknownIndex;
-    }
-  }
-  DBG_OUTPUT_PORT.println("Comm Error");
-  return CommError;
-}
-
-SetResult SetValue(String name, double value) {
-  if (state != IDLE) return CommError;
-
-  twai_message_t rxframe;
-
-  int id = getId(name);
-  const uint16_t index = SDO_INDEX_PARAM_UID | (id >> 8);
-  const uint8_t subIndex = id & 0xFF;
-
-  drainReceiveQueue();
-  setValueSdo(index, subIndex, (uint32_t)(value * 32));
-
-  if (waitForSdoReply(&rxframe, index, subIndex, SDO_WRITE_REPLY, SDO_WRITE_TIMEOUT_TICKS)) {
-    if (rxframe.data[0] == SDO_RESPONSE_DOWNLOAD)
-      return Ok;
-    else if (*(uint32_t*)&rxframe.data[4] == SDO_ERR_RANGE)
+    case OICanTask::Result::ValueOutOfRange:
       return ValueOutOfRange;
-    else
-      return UnknownIndex;
-  }
-  else {
-    return CommError;
+    default:
+      return CommError;
   }
 }
 
-bool SaveToFlash() {
-  if (state != IDLE) return false;
+struct ValueContext {
+  double value = 0.0;
+  bool hasValue = false;
+};
 
-  twai_message_t rxframe;
+struct SnapshotContext {
+  JsonDocument* doc = nullptr;
+  bool anyValue = false;
+};
 
-  drainReceiveQueue();
-  setValueSdo(SDO_INDEX_COMMANDS, SDO_CMD_SAVE, 0U);
+struct CanMapContext {
+  JsonArray array;
+};
 
-  if (waitForSdoReply(&rxframe, SDO_INDEX_COMMANDS, SDO_CMD_SAVE, SDO_WRITE_REPLY, pdMS_TO_TICKS(200)) &&
-      rxframe.data[0] == SDO_WRITE_REPLY) {
-    return true;
-  }
-  else {
-    return false;
-  }
-}
-
-bool StartStop(int opmode)
-{
-  if (state != IDLE) return false;
-
-  twai_message_t rxframe;
-  uint8_t subIdx = opmode == 0 ? SDO_CMD_STOP : SDO_CMD_START;
-
-  drainReceiveQueue();
-  setValueSdo(SDO_INDEX_COMMANDS, subIdx, opmode);
-
-  if (waitForSdoReply(&rxframe, SDO_INDEX_COMMANDS, subIdx, SDO_WRITE_REPLY, pdMS_TO_TICKS(200)) &&
-      rxframe.data[0] == SDO_WRITE_REPLY) {
-    return true;
-  }
-  else {
-    return false;
-  }
-}
-
-String StreamValues(String names, int samples) {
-  if (state != IDLE) return "";
-
-  JsonDocument doc;
-  twai_message_t rxframe;
-
-  File file = SPIFFS.open(jsonFileName, "r");
-  deserializeJson(doc, file);
-  file.close();
-
-  int ids[30], numItems = 0;
+struct StreamContext {
   String result;
-  drainReceiveQueue();
+  int currentSample = -1;
+  bool firstInSample = true;
+};
 
-  for (int pos = 0; pos >= 0; pos = names.indexOf(',', pos + 1)) {
-    String name = names.substring(pos + 1, names.indexOf(',', pos + 1));
-    ids[numItems++] = doc[name]["id"].as<int>();
+bool captureValueCallback(const OICanTask::Response& response, void* context) {
+  if (response.kind == OICanTask::ResponseKind::Value) {
+    auto* valueContext = static_cast<ValueContext*>(context);
+    valueContext->value = response.data.value.value;
+    valueContext->hasValue = true;
   }
+  return true;
+}
 
-  for (int i = 0; i < samples; i++) {
-    for (int item = 0; item < numItems; item++) {
-      int id = ids[item];
-      const uint16_t index = SDO_INDEX_PARAM_UID | (id >> 8);
-      const uint8_t subIndex = id & 0xFF;
-      requestSdoElement(index, subIndex);
+bool snapshotCallback(const OICanTask::Response& response, void* context) {
+  if (response.kind == OICanTask::ResponseKind::Value) {
+    auto* snapshotContext = static_cast<SnapshotContext*>(context);
+    if (snapshotContext->doc != nullptr) {
+      (*snapshotContext->doc)[response.data.value.name]["value"] = response.data.value.value;
+      snapshotContext->anyValue = true;
+    }
+  }
+  return true;
+}
 
-      if (waitForSdoReply(&rxframe, index, subIndex, SDO_READ_REPLY, SDO_READ_TIMEOUT_TICKS)) {
-        if (item > 0) result += ",";
-        if (rxframe.data[0] == 0x80)
-          result += "0";
-        else {
-          int receivedItem = (rxframe.data[1] << 8) + rxframe.data[3];
+bool canMapCallback(const OICanTask::Response& response, void* context) {
+  if (response.kind == OICanTask::ResponseKind::MappingItem) {
+    auto* mapContext = static_cast<CanMapContext*>(context);
+    JsonObject object = mapContext->array.add<JsonObject>();
+    object["isrx"] = response.data.mappingItem.isRx;
+    object["id"] = response.data.mappingItem.canId;
+    object["paramid"] = response.data.mappingItem.paramId;
+    object["position"] = response.data.mappingItem.position;
+    object["length"] = response.data.mappingItem.length;
+    object["gain"] = response.data.mappingItem.gain;
+    object["offset"] = response.data.mappingItem.offset;
+    object["index"] = response.data.mappingItem.index;
+    object["subindex"] = response.data.mappingItem.subIndex;
+  }
+  return true;
+}
 
-          if (receivedItem == id)
-            result += String(((double)*(int32_t*)&rxframe.data[4]) / 32, 2);
-          else
-            result += "0";
-        }
+bool streamCallback(const OICanTask::Response& response, void* context) {
+  if (response.kind == OICanTask::ResponseKind::Value) {
+    auto* streamContext = static_cast<StreamContext*>(context);
+    const int sampleIndex = response.data.value.sampleIndex;
+
+    if (streamContext->currentSample != sampleIndex) {
+      if (streamContext->currentSample >= 0) {
+        streamContext->result += "\r\n";
       }
+      streamContext->currentSample = sampleIndex;
+      streamContext->firstInSample = true;
     }
 
-    result += "\r\n";
+    if (!streamContext->firstInSample) {
+      streamContext->result += ",";
+    }
+
+    streamContext->result += String(response.data.value.value, 2);
+    streamContext->firstInSample = false;
   }
-  return result;
+  return true;
 }
 
-double GetValue(String name) {
-  if (state != IDLE) return 0;
-
-  twai_message_t rxframe;
-
-  int id = getId(name);
-  const uint16_t index = SDO_INDEX_PARAM_UID | (id >> 8);
-  const uint8_t subIndex = id & 0xFF;
-
-  drainReceiveQueue();
-  requestSdoElement(index, subIndex);
-
-  if (waitForSdoReply(&rxframe, index, subIndex, SDO_READ_REPLY, SDO_READ_TIMEOUT_TICKS)) {
-    if (rxframe.data[0] == 0x80)
-      return 0;
-    else
-      return ((double)*(uint32_t*)&rxframe.data[4]) / 32;
+bool copyStringArg(char* dest, size_t destSize, const String& source) {
+  if ((source.length() + 1U) > destSize) {
+    return false;
   }
-  else {
-    return 0;
-  }
+
+  source.toCharArray(dest, destSize);
+  return true;
 }
 
-int GetNodeId() {
-  return _nodeId;
+bool requestSchemaRefresh() {
+  OICanTask::Request request = {};
+  request.command = OICanTask::Command::DownloadSchemaJson;
+  request.timeoutTicks = pdMS_TO_TICKS(5000);
+  request.data.downloadSchemaJson.forceRedownload = true;
+  return OICanTask::SubmitAndDrain(request, nullptr, nullptr) == OICanTask::Result::Ok;
 }
 
-BaudRate GetBaudRate() {
-  return baudRate;
-}
+} // namespace
 
 void Init(uint8_t nodeId, BaudRate baud, int txPin, int rxPin) {
-  twai_general_config_t g_config = {
-        .mode = TWAI_MODE_NORMAL,
-        .tx_io = static_cast<gpio_num_t>(txPin),
-        .rx_io = static_cast<gpio_num_t>(rxPin),
-        .clkout_io = TWAI_IO_UNUSED,
-        .bus_off_io = TWAI_IO_UNUSED,
-        .tx_queue_len = 30,
-        .rx_queue_len = 30,
-        .alerts_enabled = TWAI_ALERT_NONE,
-        .clkout_divider = 0,
-        .intr_flags = 0
-  };
-
-  uint16_t id = 0x580 + nodeId;
-
-  twai_stop();
-  twai_driver_uninstall();
-
-  twai_timing_config_t t_config;
-  baudRate = baud;
-  const uint32_t baudBitsPerSecond = baudRateToBitsPerSecond(baud);
-
-  switch (baud)
-  {
-  case Baud125k:
-    t_config = TWAI_TIMING_CONFIG_125KBITS();
-    break;
-  case Baud250k:
-    t_config = TWAI_TIMING_CONFIG_250KBITS();
-    break;
-  case Baud500k:
-    t_config = TWAI_TIMING_CONFIG_500KBITS();
-    break;
-  }
-
-  twai_filter_config_t f_config = {.acceptance_code = (uint32_t)(id << 5) | (uint32_t)(0x7de << 21),
-                                   .acceptance_mask = 0x001F001F,
-                                   .single_filter = false};
-
-  if (twai_driver_install(&g_config, &t_config, &f_config) == ESP_OK) {
-     DBG_OUTPUT_PORT.printf("Driver installed tx=%d rx=%d baud=%" PRIu32 "\r\n", txPin, rxPin, baudBitsPerSecond);
-  } else {
-     DBG_OUTPUT_PORT.printf("Failed to install driver tx=%d rx=%d baud=%" PRIu32 "\r\n", txPin, rxPin, baudBitsPerSecond);
-     return;
-  }
-
-  // Start TWAI driver
-  if (twai_start() == ESP_OK) {
-    printf("Driver started\n");
-  } else {
-    printf("Failed to start driver\n");
+  if (!OICanTask::StartTask()) {
     return;
   }
 
-  _nodeId = nodeId;
-  state = OBTAINSERIAL;
-  startupRetryCount = 0;
-  requestSdoElement(SDO_INDEX_SERIAL, 0);
-  lastStartupRequestMs = millis();
-  DBG_OUTPUT_PORT.println("Initialized CAN");
+  OICanTask::Reconfigure(nodeId, toTaskBaudRate(baud), txPin, rxPin);
 }
 
 void Loop() {
-  bool recvdResponse = false;
-  twai_message_t rxframe;
-
-  if (receiveFrame(&rxframe, 0) == ESP_OK) {
-    if (rxframe.identifier == (0x580 | _nodeId)) {
-      handleSdoResponse(&rxframe);
-      recvdResponse = true;
-    }
-    else if (rxframe.identifier == 0x7de)
-      handleUpdate(&rxframe);
-    else
-      DBG_OUTPUT_PORT.printf("Received unwanted frame %" PRIu32 "\r\n", rxframe.identifier);
-  }
-
-  if (state == OBTAINSERIAL &&
-      (millis() - lastStartupRequestMs >= STARTUP_RETRY_INTERVAL_MS)) {
-    requestSdoElement(SDO_INDEX_SERIAL, 0);
-    lastStartupRequestMs = millis();
-    startupRetryCount++;
-
-    if (startupRetryCount % STARTUP_RETRY_LOG_INTERVAL == 0) {
-      DBG_OUTPUT_PORT.printf("CAN init pending, retry count %d\r\n", startupRetryCount);
-    }
-  }
-
-  if (updstate == REQUEST_JSON) {
-    //Re-download JSON if necessary
-
-    retries--;
-
-    if (recvdResponse || retries < 0)
-      updstate = UPD_IDLE; //if request was successful
-    else
-      requestSdoElement(SDO_INDEX_SERIAL, 0);
-
-     delay(100);
-  }
-
+  delay(0);
 }
 
+bool SendJson(WebServer& server) {
+  char schemaPath[OICanTask::kPathLength] = {};
+  if (!OICanTask::GetSchemaFileName(schemaPath, sizeof(schemaPath))) {
+    return false;
+  }
+
+  File file = SPIFFS.open(schemaPath, "r");
+  if (!file) {
+    return false;
+  }
+
+  JsonDocument doc;
+  const DeserializationError error = deserializeJson(doc, file);
+  file.close();
+
+  if (error != DeserializationError::Ok) {
+    requestSchemaRefresh();
+    return false;
+  }
+
+  SnapshotContext context;
+  context.doc = &doc;
+  context.anyValue = false;
+  OICanTask::Request request = {};
+  request.command = OICanTask::Command::ReadLiveSnapshot;
+  request.timeoutTicks = pdMS_TO_TICKS(15000);
+
+  const OICanTask::Result result = OICanTask::SubmitAndDrain(request, snapshotCallback, &context);
+  if ((result != OICanTask::Result::Ok) || !context.anyValue) {
+    return false;
+  }
+
+  auto client = server.client();
+  server.setContentLength(measureJson(doc));
+  server.send(200, "application/json", "");
+  serializeJson(doc, client);
+  return true;
 }
+
+void SendCanMapping(WebServer& server) {
+  JsonDocument doc;
+  JsonArray array = doc.to<JsonArray>();
+  CanMapContext context;
+  context.array = array;
+
+  OICanTask::Request request = {};
+  request.command = OICanTask::Command::ReadCanMap;
+  request.timeoutTicks = pdMS_TO_TICKS(5000);
+
+  const OICanTask::Result result = OICanTask::SubmitAndDrain(request, canMapCallback, &context);
+  if (result != OICanTask::Result::Ok) {
+    server.send(500, "text/plain", "CAN communication error");
+    return;
+  }
+
+  auto client = server.client();
+  server.setContentLength(measureJson(doc));
+  server.send(200, "application/json", "");
+  serializeJson(doc, client);
+}
+
+SetResult AddCanMapping(String json) {
+  OICanTask::Request request = {};
+  request.command = OICanTask::Command::AddCanMapping;
+  request.timeoutTicks = pdMS_TO_TICKS(1000);
+  if (!copyStringArg(request.data.mapJson.json, sizeof(request.data.mapJson.json), json)) {
+    return CommError;
+  }
+
+  return mapTaskResult(OICanTask::SubmitAndDrain(request, nullptr, nullptr));
+}
+
+SetResult RemoveCanMapping(String json) {
+  JsonDocument doc;
+  if (deserializeJson(doc, json) != DeserializationError::Ok) {
+    return UnknownIndex;
+  }
+
+  if (doc["index"].isNull() || doc["subindex"].isNull()) {
+    return UnknownIndex;
+  }
+
+  OICanTask::Request request = {};
+  request.command = OICanTask::Command::RemoveCanMapping;
+  request.timeoutTicks = pdMS_TO_TICKS(500);
+  request.data.removeMap.index = doc["index"].as<uint16_t>();
+  request.data.removeMap.subIndex = doc["subindex"].as<uint8_t>();
+  return mapTaskResult(OICanTask::SubmitAndDrain(request, nullptr, nullptr));
+}
+
+SetResult SetValue(String name, double value) {
+  OICanTask::Request request = {};
+  request.command = OICanTask::Command::SetValue;
+  request.timeoutTicks = pdMS_TO_TICKS(500);
+  if (!copyStringArg(request.data.setValue.name, sizeof(request.data.setValue.name), name)) {
+    return UnknownIndex;
+  }
+  request.data.setValue.value = static_cast<float>(value);
+  return mapTaskResult(OICanTask::SubmitAndDrain(request, nullptr, nullptr));
+}
+
+double GetValue(String name) {
+  OICanTask::Request request = {};
+  request.command = OICanTask::Command::GetValue;
+  request.timeoutTicks = pdMS_TO_TICKS(500);
+  if (!copyStringArg(request.data.getValue.name, sizeof(request.data.getValue.name), name)) {
+    return 0;
+  }
+
+  ValueContext context;
+  const OICanTask::Result result = OICanTask::SubmitAndDrain(request, captureValueCallback, &context);
+  if ((result != OICanTask::Result::Ok) || !context.hasValue) {
+    return 0;
+  }
+
+  return context.value;
+}
+
+bool StartStop(int opmode) {
+  OICanTask::Request request = {};
+  request.command = OICanTask::Command::StartStop;
+  request.timeoutTicks = pdMS_TO_TICKS(500);
+  request.data.startStop.opmode = opmode;
+  return OICanTask::SubmitAndDrain(request, nullptr, nullptr) == OICanTask::Result::Ok;
+}
+
+bool SaveToFlash() {
+  OICanTask::Request request = {};
+  request.command = OICanTask::Command::SaveToFlash;
+  request.timeoutTicks = pdMS_TO_TICKS(500);
+  return OICanTask::SubmitAndDrain(request, nullptr, nullptr) == OICanTask::Result::Ok;
+}
+
+String StreamValues(String names, int samples) {
+  OICanTask::Request request = {};
+  request.command = OICanTask::Command::StreamValues;
+  request.timeoutTicks = pdMS_TO_TICKS(static_cast<uint32_t>(samples > 0 ? samples : 1) * 500U + 1000U);
+  request.data.streamValues.samples = static_cast<uint16_t>(samples > 0 ? samples : 0);
+  if (!copyStringArg(request.data.streamValues.namesCsv, sizeof(request.data.streamValues.namesCsv), names)) {
+    return "";
+  }
+
+  StreamContext context;
+  const OICanTask::Result result = OICanTask::SubmitAndDrain(request, streamCallback, &context);
+  if (result != OICanTask::Result::Ok) {
+    return "";
+  }
+
+  if (context.currentSample >= 0) {
+    context.result += "\r\n";
+  }
+
+  return context.result;
+}
+
+int StartUpdate(String fileName) {
+  OICanTask::Request request = {};
+  request.command = OICanTask::Command::StartFirmwareUpdate;
+  request.timeoutTicks = pdMS_TO_TICKS(1000);
+  if (!copyStringArg(request.data.startFirmwareUpdate.fileName, sizeof(request.data.startFirmwareUpdate.fileName), fileName)) {
+    return 0;
+  }
+
+  if (OICanTask::SubmitAndDrain(request, nullptr, nullptr) != OICanTask::Result::Ok) {
+    return 0;
+  }
+
+  return OICanTask::GetUpdateTotalPages();
+}
+
+int GetCurrentUpdatePage() {
+  return OICanTask::GetCurrentUpdatePage();
+}
+
+int GetNodeId() {
+  return OICanTask::GetNodeId();
+}
+
+BaudRate GetBaudRate() {
+  return static_cast<BaudRate>(OICanTask::GetBaudRate());
+}
+
+} // namespace OICan
