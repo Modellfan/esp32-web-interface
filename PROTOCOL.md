@@ -47,6 +47,20 @@ state of the inverter. These are useful for monitoring and debugging.
 Note: This is not an exhaustive list of commands supported by openinverter devices, but does include
 all commands currently used by the openinverter web intrface.
 
+## SDO Commands
+
+Write requests to SDO index `0x5002` trigger command actions used by the web interface.
+
+| Subindex | Command |
+|----------|---------|
+|`0`|save parameters and CAN mappings to flash|
+|`1`|load parameters and CAN mappings from flash|
+|`2`|reset the device|
+|`3`|restore parameter defaults|
+|`4`|start the inverter|
+|`5`|stop the inverter|
+|`6`|clear all CAN mappings|
+
 ## JSON Mapping
 
 The json command requests a dump of the full schema and values of both the configurable parameters

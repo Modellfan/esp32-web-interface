@@ -57,9 +57,9 @@
 #define SDO_CMD_LOAD          1
 #define SDO_CMD_RESET         2
 #define SDO_CMD_DEFAULTS      3
-#define SDO_CMD_CLEAR_CAN     4
 #define SDO_CMD_START         4
 #define SDO_CMD_STOP          5
+#define SDO_CMD_CLEAR_CAN     6
 #define MAX_ERROR_LOG_ENTRIES 100
 
 namespace OICan {
@@ -565,6 +565,7 @@ SetResult ClearCanMapping() {
 
   twai_message_t rxframe;
 
+  DBG_OUTPUT_PORT.println("Sending clear CAN mappings command");
   setValueSdo(SDO_INDEX_COMMANDS, SDO_CMD_CLEAR_CAN, 0U);
 
   if (twai_receive(&rxframe, pdMS_TO_TICKS(200)) == ESP_OK) {
