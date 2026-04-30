@@ -1234,14 +1234,51 @@ var ui = {
 		modal.showModal('small');
 	},
 
-	/** @brief Clear all CAN mappings via direct SDO and reload the table */
+	/** @brief Show the result of a clear CAN mappings request */
+	showClearCanMappingResultModal: function(message, autoHide)
+	{
+		modal.emptyModal('small');
+		var msg = "<p style=\"padding:20px;text-align:center;\">" + message + "</p>";
+		modal.appendToModal('small', msg);
+		modal.showModal('small');
+		if (autoHide) {
+			setTimeout(function() { modal.hideModal('small'); }, 2000);
+		}
+	},
+
+	/** @brief Clear all CAN mappings and reload the table */
 	clearCanMapping: function()
 	{
-		modal.hideModal('small');
-		inverter.clearCanMapping(function(values) {
+		ui.showClearCanMappingResultModal('Clearing CAN mappings...', false);
+
+		var request = new XMLHttpRequest();
+		request.timeout = 5000;
+		request.onload = function() {
+			if (request.status != 200) {
+				ui.showClearCanMappingResultModal(request.responseText || 'Clearing CAN mappings failed', true);
+				return;
+			}
+
+			var values = [];
+			try {
+				values = JSON.parse(request.responseText);
+			}
+			catch (ex) {
+				ui.showClearCanMappingResultModal('Unexpected response while clearing CAN mappings', true);
+				return;
+			}
+
 			ui.populateExistingCanMappingTable(values);
-			ui.showParamSuccessBar('CAN mappings cleared');
-		});
+			ui.showClearCanMappingResultModal('CAN mappings cleared', true);
+		};
+		request.onerror = function() {
+			ui.showClearCanMappingResultModal('Communication error while clearing CAN mappings', true);
+		};
+		request.ontimeout = function() {
+			ui.showClearCanMappingResultModal('Timed out while clearing CAN mappings', true);
+		};
+		request.open('GET', '/canmap?clear=1', true);
+		request.send();
 	},
 
 	/** @brief Populate the table of existing CAN mappings */
