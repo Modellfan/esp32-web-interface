@@ -243,55 +243,15 @@ String getContentType(String filename){
   return "text/plain";
 }
 
-static const char* httpMethodName(HTTPMethod method) {
-  switch (method) {
-    case HTTP_GET: return "GET";
-    case HTTP_POST: return "POST";
-    case HTTP_DELETE: return "DELETE";
-    case HTTP_PUT: return "PUT";
-    case HTTP_PATCH: return "PATCH";
-    case HTTP_HEAD: return "HEAD";
-    case HTTP_OPTIONS: return "OPTIONS";
-    default: return "OTHER";
-  }
-}
-
-static void debugHttpRequest(const char* context) {
-  DBG_OUTPUT_PORT.printf("HTTP DEBUG %s method=%s(%d) uri=%s args=%d host=%s\r\n",
-                         context,
-                         httpMethodName(server.method()),
-                         static_cast<int>(server.method()),
-                         server.uri().c_str(),
-                         server.args(),
-                         server.hostHeader().c_str());
-
-  for (int i = 0; i < server.args(); i++) {
-    String value = server.arg(i);
-    if (value.length() > 80)
-      value = value.substring(0, 80) + "...";
-    DBG_OUTPUT_PORT.printf("HTTP DEBUG arg[%d] %s=%s\r\n",
-                           i,
-                           server.argName(i).c_str(),
-                           value.c_str());
-  }
-}
-
 bool handleFileRead(String path){
-  String requestedPath = path;
+  //DBG_OUTPUT_PORT.println("handleFileRead: " + path);
   if(path.endsWith("/")) path += "index.html";
   String contentType = getContentType(path);
   String pathWithGz = path + ".gz";
   if(SPIFFS.exists(pathWithGz) || SPIFFS.exists(path)){
-    bool gzip = SPIFFS.exists(pathWithGz);
-    if(gzip)
+    if(SPIFFS.exists(pathWithGz))
       path += ".gz";
     File file = SPIFFS.open(path, "r");
-    DBG_OUTPUT_PORT.printf("HTTP DEBUG file served from SPIFFS request=%s path=%s type=%s size=%u gzip=%d\r\n",
-                           requestedPath.c_str(),
-                           path.c_str(),
-                           contentType.c_str(),
-                           static_cast<unsigned>(file.size()),
-                           gzip);
     server.sendHeader("Cache-Control", "max-age=86400");
     server.streamFile(file, contentType);
     file.close();
@@ -306,21 +266,16 @@ bool handleFileRead(String path){
 
     if (SD_MMC.exists(path)) {
       File file = SD_MMC.open(path, "r");
-      DBG_OUTPUT_PORT.printf("HTTP DEBUG file served from SD request=%s path=%s type=%s size=%u\r\n",
-                             requestedPath.c_str(),
-                             path.c_str(),
-                             contentType.c_str(),
-                             static_cast<unsigned>(file.size()));
       server.streamFile(file, contentType);
       file.close();
     return true;
     }
   }
-  DBG_OUTPUT_PORT.printf("HTTP DEBUG file missing request=%s normalized=%s type=%s\r\n",
-                         requestedPath.c_str(),
-                         path.c_str(),
-                         contentType.c_str());
   return false;
+}
+
+static void handleStaticFile() {
+  if(!handleFileRead(server.uri())) server.send(404, "text/plain", "FileNotFound");
 }
 
 void handleFileUpload(){
@@ -877,14 +832,39 @@ void setup(void){
   server.on("/version", [](){ server.send(200, "text/plain", "1.1.R"); });
   server.on("/nodeid", handleNodeId);
   server.on("/settings", handleSettings);
+  server.on("/", HTTP_GET, [](){
+    if(!handleFileRead("/")) server.send(404, "text/plain", "FileNotFound");
+  });
+  server.on("/ajax-loader.gif", HTTP_GET, handleStaticFile);
+  server.on("/chart.min.js", HTTP_GET, handleStaticFile);
+  server.on("/docstrings.js", HTTP_GET, handleStaticFile);
+  server.on("/icon-check-circle.png", HTTP_GET, handleStaticFile);
+  server.on("/icon-trash.png", HTTP_GET, handleStaticFile);
+  server.on("/icon-x-square.png", HTTP_GET, handleStaticFile);
+  server.on("/index.html", HTTP_GET, handleStaticFile);
+  server.on("/index.js", HTTP_GET, handleStaticFile);
+  server.on("/inverter.js", HTTP_GET, handleStaticFile);
+  server.on("/log.js", HTTP_GET, handleStaticFile);
+  server.on("/logo.png", HTTP_GET, handleStaticFile);
+  server.on("/modal.js", HTTP_GET, handleStaticFile);
+  server.on("/plot.js", HTTP_GET, handleStaticFile);
+  server.on("/settings.js", HTTP_GET, handleStaticFile);
+  server.on("/style.css", HTTP_GET, handleStaticFile);
+  server.on("/ui.js", HTTP_GET, handleStaticFile);
+  server.on("/wifi.js", HTTP_GET, handleStaticFile);
+  server.on("/subscription.js", HTTP_GET, [](){
+    if(!handleFileRead("/subscription.js"))
+      server.send(200, "application/javascript", "var subscription = null;");
+  });
+  server.on("/favicon.ico", HTTP_GET, [](){
+    server.send(204, "image/x-icon", "");
+  });
 
   //called when the url is not defined here
-  //use it to load content from SPIFFS
+  //use it to load content from SD card
   server.onNotFound([](){
-    debugHttpRequest("onNotFound");
     if(!handleFileRead(server.uri()))
     {
-      DBG_OUTPUT_PORT.printf("HTTP DEBUG sending 404 uri=%s\r\n", server.uri().c_str());
       server.sendHeader("Refresh", "6; url=/update");
       server.send(404, "text/plain", "FileNotFound");
     }
